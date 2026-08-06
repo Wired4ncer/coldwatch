@@ -1,0 +1,276 @@
+# Architecture
+
+The build plan. Read [CONTRIBUTING.md](../CONTRIBUTING.md) §1 first — the invariants there are
+constraints on everything below.
+
+**Stack:** Python + SQLite (WAL) + Docker Compose. One service box, plus an independent watchdog
+on separate infrastructure.
+
+---
+
+## 1. Key material
+
+One **master secret** lives outside the database — environment variable or systemd
+`LoadCredential` — and never on the same backup media as the database. Two subkeys via HKDF:
+
+```
+k_match = HKDF(master, "coldwatch/match/v1")   # keyed HMAC for watch targets
+k_store = HKDF(master, "coldwatch/store/v1")   # AEAD for labels and channel destinations
+```
+
+Two keys rather than one because their exposure profiles differ: `k_match` is needed constantly
+in the hot matching loop, `k_store` only at enrolment, alert-fire, and dashboard render.
+
+**Threat model:**
+
+| Attacker has | Outcome |
+|---|---|
+| The database alone | Unmatchable noise. Addresses are HMAC'd under a key that isn't there. |
+| Database **and** master key | Full exposure of watch targets. |
+| Live compromise of the running service | Full exposure. Accepted residual, stated publicly. |
+
+**HMAC the scriptPubKey, not the address string** — canonical form kills encoding aliases, and
+it is what the stream gives us anyway. For spend detection, additionally HMAC **outpoints**
+(`txid:vout`, canonically serialised).
+
+> **Why HMAC and not a plain hash.** Addresses come from a public, enumerable set. Anyone holding
+> `SHA256(address)` can hash the chain's entire address set and match. Hashing protects secrets;
+> an address is not a secret. The key is what makes the storage unmatchable.
+
+---
+
+## 2. Enrolment
+
+```
+POST /enroll                              1. validate address → derive scriptPubKey
+  { address, label, incoming_mode,        2. spk_hmac = HMAC(k_match, spk)
+    channels[] }                          3. queue a baseline scan job → item PENDING
+                                          4. label_ct = AEAD(k_store, label)
+                                             dest_ct  = AEAD(k_store, channel dest)
+                                          5. drop plaintext
+                                          6. mint capability token (32 random bytes),
+                                             store only sha256(token)
+ ← { token, item_id, status: ARMING }     7. test-fire each channel; item ACTIVE only
+                                             after the user confirms receipt
+```
+
+### Enrolment is asynchronous, and this is not optional
+
+The baseline scan takes **~186 seconds**, measured. Three consequences:
+
+1. **`ARMING` is a user-visible state.** The response returns immediately; the watch is not live
+   until the scan completes. The UI must say so, and the user must be told when it arms.
+2. **Scans serialise.** bitcoind runs one `scantxoutset` at a time. The job runner needs a
+   depth-bounded queue and an answer for what a queued user sees. Ten signups in an hour is a
+   half-hour tail on the last one.
+3. **An abandoned scan does not stop.** Killing the client leaves the scan running on the node,
+   consuming a core. The job runner must issue `scantxoutset abort` on its own death.
+
+### Rules that make it genuinely forgetful
+
+- The plaintext address exists only in request scope (invariant I1).
+- The scan runs against our own node over localhost RPC with a whitelisted user. The address
+  leaves the process only to reach our own node.
+- No IP logging on the web tier. A Tor onion service is the flagship access path.
+- The capability token is shown **once**. `sha256(token)` is the lookup key for everything.
+  Lost token means lost service, stated plainly at signup.
+
+---
+
+## 3. Storage schema
+
+```sql
+CREATE TABLE watch (                      -- one anonymous tenant = one capability token
+  id            INTEGER PRIMARY KEY,
+  token_hash    BLOB NOT NULL UNIQUE,     -- sha256(capability token)
+  balance_sats  INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'active',   -- active|grace|stopped
+  alarm_undelivered INTEGER NOT NULL DEFAULT 0,   -- an alarm exhausted every channel
+  created_at    INTEGER NOT NULL          -- day precision (invariant I3)
+);
+
+CREATE TABLE watch_item (
+  id            INTEGER PRIMARY KEY,
+  watch_id      INTEGER NOT NULL REFERENCES watch(id),
+  chain         TEXT NOT NULL,
+  spk_hmac      BLOB NOT NULL,            -- NOT unique: two tenants may watch one address
+  label_ct      BLOB NOT NULL,
+  incoming_mode TEXT NOT NULL DEFAULT 'info',     -- info|mute (outgoing is always alarm)
+  status        TEXT NOT NULL DEFAULT 'arming',   -- arming|active|paused|stopped
+  drip_rate     INTEGER NOT NULL DEFAULT 10,      -- sats/day
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX idx_item_spk ON watch_item(spk_hmac);
+
+CREATE TABLE utxo (                       -- live outpoint set, for spend detection
+  item_id       INTEGER NOT NULL REFERENCES watch_item(id),
+  outpoint_hmac BLOB NOT NULL,
+  PRIMARY KEY (item_id, outpoint_hmac)
+);
+CREATE INDEX idx_utxo_op ON utxo(outpoint_hmac);
+
+CREATE TABLE channel (
+  id            INTEGER PRIMARY KEY,
+  watch_id      INTEGER NOT NULL REFERENCES watch(id),
+  kind          TEXT NOT NULL,            -- email|nostr|webhook|ntfy
+  dest_ct       BLOB NOT NULL,
+  privacy_ack   INTEGER NOT NULL DEFAULT 0,   -- user acknowledged a non-private channel
+  verified_at   INTEGER                   -- test-fire confirmed; NULL means unusable
+);
+
+CREATE TABLE route (
+  item_id       INTEGER NOT NULL REFERENCES watch_item(id),
+  channel_id    INTEGER NOT NULL REFERENCES channel(id),
+  min_severity  TEXT NOT NULL DEFAULT 'info',
+  PRIMARY KEY (item_id, channel_id)
+);
+
+-- Deliberately NO event history (invariant I3). The outbox holds a row only while a
+-- delivery is in flight; it is deleted on completion, success or permanent failure.
+CREATE TABLE outbox (
+  id            INTEGER PRIMARY KEY,
+  item_id       INTEGER NOT NULL,
+  channel_id    INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  direction     TEXT,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  next_try_at   INTEGER NOT NULL
+);
+```
+
+Run with `secure_delete=ON`; `VACUUM` after bulk deletion. SQLite leaves freed pages readable
+otherwise, which quietly undoes a purge.
+
+---
+
+## 4. The matching loop
+
+```
+ZMQ rawtx / rawblock  (two separate SUB sockets — see below)
+  → parse transaction
+  → for each INPUT outpoint:  HMAC → lookup utxo       → OUTGOING (alarm)
+  → for each OUTPUT spk:      HMAC → lookup watch_item → INCOMING (informational)
+       └─ on hit: insert the new outpoint HMAC into utxo, keeping the set live
+  → on OUTGOING: delete the spent outpoint from utxo
+  → enqueue outbox rows → delivery workers
+```
+
+Pure HMAC-and-compare. Plaintext chain data is public and is never persisted.
+
+### This loop must not assume it sees everything
+
+See invariant I4. Three requirements:
+
+1. **Two SUB sockets, one per endpoint.** A block message is ~1.7 MB and will crowd the
+   transaction stream if they share a socket.
+2. **Per-topic sequence tracking.** The 3rd ZMQ message part is a 4-byte little-endian counter.
+   A discontinuity is a drop. Alert on it.
+3. **Periodic reconciliation against the UTXO set**, repairing what the stream missed. This is a
+   v1 requirement, not later hardening. Test it by *inducing* a gap — `tests/fixtures/with-gap.jsonl`
+   exists for exactly this.
+
+The block handler additionally re-processes transactions for confirmation tracking and for
+catch-up after downtime: on restart, rescan blocks since the last seen height.
+
+> **Note:** the node is pruned. `getblock` below the prune height fails, so no design may assume
+> arbitrary historical block retrieval.
+
+---
+
+## 5. Delivery channels
+
+The privacy analysis is baked in as **types**, so the enrolment UI can rank channels honestly and
+a renderer cannot over-share by accident.
+
+```python
+class PrivacyClass(Enum):
+    E2E_PRIVATE      = "e2e"       # content + metadata private: Nostr NIP-17 gift-wrap
+    ENDPOINT_TRUSTED = "endpoint"  # user controls the endpoint: webhook, self-hosted ntfy
+    PROVIDER_READS   = "provider"  # operator reads content and metadata: email, ntfy.sh
+
+@dataclass(frozen=True)
+class Alert:
+    kind: AlertKind                # movement | test_fire | low_balance | watch_stopped | heartbeat
+    label: str                     # the user's own nickname — the ONLY user data in any alert
+    chain: str
+    direction: Direction | None    # outgoing (alarm) | incoming (informational)
+    fired_at: datetime
+    # No address. No amount. No txid. Renderers cannot leak what the dataclass does not carry.
+
+class Channel(Protocol):
+    kind: ClassVar[str]
+    privacy_class: ClassVar[PrivacyClass]
+
+    def validate_dest(self, raw: str) -> str: ...
+    def send(self, dest: str, alert: Alert) -> DeliveryResult: ...
+```
+
+`Channel` is the main extension point and the cleanest unit of independent work — an
+implementation can be built and tested with no node and no database.
+
+| kind | class | notes |
+|---|---|---|
+| `email` | `PROVIDER_READS` | **First rail — reach.** Requires `privacy_ack`. Subject is a **constant** (subjects are logged and indexed everywhere); body is a minimal template. Enforce TLS, no opportunistic downgrade. ⚠️ See the hardening note below. |
+| `nostr` | `E2E_PRIVATE` | NIP-17 gift-wrap to the user's npub — content *and* sender/recipient metadata sealed. The privacy-recommended default. |
+| `webhook` | `ENDPOINT_TRUSTED` | POST JSON, HMAC-signed with a per-channel secret shown once so the user can authenticate us. Egress over Tor. |
+| `ntfy` | either | Self-hosted URL is endpoint-trusted; the public instance is provider-reads — flag it. A random topic is not authentication. |
+
+**Telegram is deliberately absent.** Bot chats are never end-to-end encrypted and the account is
+phone-linked. It may be added later as `PROVIDER_READS` behind the same acknowledgement gate,
+but that is a decision to make explicitly, not a default to drift into.
+
+### Email carries work that lands outside the database
+
+Postfix keeps its own plaintext copies — `mail.log` and the deferred queue both hold the
+destination, bypassing `dest_ct` entirely. An email-capable release without log scrubbing and
+queue purging **breaks the register-and-forget claim outside the database**, where the encryption
+cannot help. That hardening ships with the email channel, not after it.
+
+### Delivery pipeline
+
+```
+match → outbox row per route → decrypt dest (in memory only)
+      → render per-kind template → channel.send()
+      → retry with exponential backoff (retriable failures only)
+      → SUCCESS: delete the outbox row
+      → EXHAUSTED on an alarm: set watch.alarm_undelivered, bump a label-free
+        escalation metric visible to the watchdog, delete the row anyway
+```
+
+**Send-timing correlation.** An observer who sees a message arrive N seconds after a public
+on-chain transaction can link identity to address without reading any content. Outgoing alarms
+send **instantly** — speed is the product — so this residual is accepted and stated publicly.
+Informational, heartbeat and balance messages get random jitter of minutes, and heartbeats
+double as cover traffic.
+
+This is why the honest claim is **unlinkability**, never "nobody can tell."
+
+---
+
+## 6. Retention
+
+Publish this table; it is a trust asset.
+
+| Data | Retention |
+|---|---|
+| Watched targets | HMAC only, until the user deletes them |
+| Labels, channel destinations | AEAD-encrypted, until deleted |
+| Alert history | **Never stored** |
+| Outbox rows | Only while a delivery is in flight |
+| Web logs | No IP logging |
+| Timestamps | Day precision |
+| Stopped tenants | Purged |
+
+A token-authenticated nuke endpoint deletes everything for a tenant immediately.
+
+---
+
+## 7. Build order
+
+1. **Ingest core** — two SUB sockets, sequence-gap detection, reconciliation, scan supervisor
+   with abort-on-death. *The risk lives here.*
+2. **Channel abstraction** + the Nostr implementation (proves the delivery pipeline cheaply).
+3. **Email channel** + postfix hardening (the reach rail, and the harder one).
+4. **Enrolment API** + capability tokens + the arming state machine.
+5. **Payment** — Lightning, prepaid balance, drip debit.
+6. **Watchdog** on separate infrastructure, plus the public uptime page.
