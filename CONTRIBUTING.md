@@ -126,8 +126,8 @@ Practically, this means treat every commit as though it were already public:
   comments, not in fixture filenames.
 - No credentials, obviously, but also no credential *shapes* — a redacted example that reveals
   the format is still a hint.
-- Nothing about the origin case. The product thesis is public; a third party's active
-  investigation is not, and their consent to the story does not extend to details.
+- Nothing about the origin case beyond what the public site already says. The thesis is public;
+  the specifics belong to someone else and are not ours to publish.
 
 A secret committed and then removed in a later commit is still in the history and still ships on
 the day the repository opens. If it happens, say so immediately — the fix is history rewriting
