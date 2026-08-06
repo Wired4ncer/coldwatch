@@ -74,6 +74,13 @@ You do not need a Bitcoin node, credentials, or access to any host to build or t
 this repository. That is deliberate.
 
 ```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt        # pyzmq, for the stream replay
+```
+
+Then:
+
+```bash
 # Serve a recorded transaction stream over ZMQ, exactly as bitcoind would
 python tools/replay_zmq.py tests/fixtures/stream-sample.jsonl --port 28333
 
