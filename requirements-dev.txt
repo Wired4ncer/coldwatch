@@ -1,0 +1,7 @@
+# Development and test dependencies.
+# The service itself is not packaged yet; this is what the tools in tools/ need.
+
+pyzmq>=25.0    # ZMQ stream replay (tools/replay_zmq.py)
+
+# tools/fake_rpc.py and tools/make_fixtures.py are stdlib-only, by design —
+# a contributor can run the RPC fixture with nothing installed at all.
