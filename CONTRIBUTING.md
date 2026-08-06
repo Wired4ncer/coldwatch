@@ -64,7 +64,7 @@ delivery channel is not considered working until a test-fire has been confirmed 
 ### I6. Secrets never enter the repository
 
 The master key lives outside the database and outside the repo. Check `.gitignore` before adding
-any config file. See §4 — **this repository will become public, and its history with it.**
+any config file. See §4 — **this repository is public, and its history is permanent.**
 
 ---
 
@@ -113,13 +113,13 @@ running server-side** unless explicitly aborted. Test against the real number.
 
 ---
 
-## 4. This repository will become public
+## 4. This repository is public
 
-It is private today and will be opened once a licence is chosen. When that happens, **the entire
-history becomes public — every commit, not just the current files.** There is no way to publish
-from a point forward.
+It went public on 2026-08-06. There is no staging period and no grace window: **the moment you
+push, it is published.** Git history is permanent — a secret committed and removed in a later
+commit is still in the history, still fetchable, and still there years later.
 
-Practically, this means treat every commit as though it were already public:
+So there is nothing to "treat as though" — every commit *is* public:
 
 - No real addresses in tests or fixtures. Generate them, or use documented test vectors.
 - No hostnames, IP addresses, usernames, or infrastructure details — not in code, not in
@@ -129,6 +129,17 @@ Practically, this means treat every commit as though it were already public:
 - Nothing about the origin case beyond what the public site already says. The thesis is public;
   the specifics belong to someone else and are not ours to publish.
 
-A secret committed and then removed in a later commit is still in the history and still ships on
-the day the repository opens. If it happens, say so immediately — the fix is history rewriting
-and credential rotation, and both get harder the longer they wait.
+**Issues and pull request comments are public too.** This is the surface people forget, because
+a clean `git log` says nothing about what is written in a comment thread. Two consequences:
+
+- Planning and decision-making that touches anything sensitive does not belong in an issue here.
+- **Editing is not redaction.** GitHub keeps edit history on issue bodies and comments, visible to
+  anyone who can read them. To actually remove something you must *delete* the comment or issue.
+
+One more, learned the hard way: **a safety note is content too, and it carries the shape of what it
+protects.** Writing "never mention X" into a public artifact mentions X. If a rule only makes sense
+by describing the thing it is protecting, the rule belongs somewhere private and the public version
+should state the instruction without the referent.
+
+If a secret does get committed, say so immediately — the fix is history rewriting plus rotating
+whatever leaked, and both get harder the longer they wait.
