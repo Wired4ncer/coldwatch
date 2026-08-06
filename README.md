@@ -66,4 +66,11 @@ be. What cannot be cloned is a public track record.
 
 ## License
 
-Not yet chosen. Until one is added, no rights are granted.
+[MIT](LICENSE) — `SPDX-License-Identifier: MIT`
+
+Permissive on purpose. The product is a hosted service and a reputation for running it
+honestly; neither of those is something a copy of the source can take. Restricting reuse would
+buy nothing real and would undercut the reason this code is public at all.
+
+Note what a licence does *not* do: it grants no rights to the project's name, and it cannot make
+a fork trustworthy. If you run a modified copy, run it under your own name.
