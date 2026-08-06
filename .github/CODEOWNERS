@@ -1,0 +1,10 @@
+# Privacy-critical paths get a second reader before merge.
+# Not distrust — the same reason surgeons count instruments.
+
+/docs/                @Wired4ncer
+CONTRIBUTING.md       @Wired4ncer
+
+# The invariants live or die in these:
+/src/coldwatch/match/     @Wired4ncer
+/src/coldwatch/storage/   @Wired4ncer
+/src/coldwatch/channels/  @Wired4ncer
