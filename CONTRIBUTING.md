@@ -89,6 +89,9 @@ python tools/replay_zmq.py tests/fixtures/with-gap.jsonl --port 28333
 
 # A fake bitcoind RPC, including a realistic slow scantxoutset
 python tools/fake_rpc.py --port 18332 --scan-delay 186
+
+# Break the code on purpose and check the tests object
+python tools/mutate.py
 ```
 
 **On `--scan-delay 186`:** that is the real measured duration of a `scantxoutset` against the
@@ -106,6 +109,11 @@ running server-side** unless explicitly aborted. Test against the real number.
   harder to revert.
 - Tests for anything with a failure mode. Especially: make the failure happen, then fix it. A
   reconciliation loop that has never caught anything is not known to work.
+- **Run `python tools/mutate.py` before opening a pull request that touches
+  `src/coldwatch/match/`.** It applies a list of specific wrong implementations and requires
+  each one to turn the suite red. A passing suite says the code does something; the sweep says
+  the tests would object if it did the wrong thing instead. If you add behaviour, add a
+  mutation for it — a green sweep that never exercised your change has told you nothing.
 - `CODEOWNERS` routes privacy-critical paths to a second reader. That is not distrust; it is the
   same reason surgeons count instruments.
 
