@@ -109,8 +109,8 @@ running server-side** unless explicitly aborted. Test against the real number.
   harder to revert.
 - Tests for anything with a failure mode. Especially: make the failure happen, then fix it. A
   reconciliation loop that has never caught anything is not known to work.
-- **Run `python tools/mutate.py` before opening a pull request that touches
-  `src/coldwatch/match/`.** It applies a list of specific wrong implementations and requires
+- **Run `python tools/mutate.py` before opening a pull request that touches anything under
+  `src/coldwatch/`.** It applies a list of specific wrong implementations and requires
   each one to turn the suite red. A passing suite says the code does something; the sweep says
   the tests would object if it did the wrong thing instead. If you add behaviour, add a
   mutation for it — a green sweep that never exercised your change has told you nothing.

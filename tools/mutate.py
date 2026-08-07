@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src" / "coldwatch" / "match"
+SRC = ROOT / "src" / "coldwatch"
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,7 @@ class Mutation:
     """One deliberate breakage, and what the suite is expected to do about it."""
 
     module: str
+    """Path under `src/coldwatch/`, e.g. `match/tx.py`."""
     describes: str
     """What the mutation makes the code believe. Phrased as the wrong behaviour, not as a diff."""
     old: str
@@ -91,124 +92,124 @@ OUTPUTS_LOOP = """\
 MUTATIONS: list[Mutation] = [
     # ── sequence.py: the gap detector is the tripwire on the tripwire ───────────────────────
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="a gap is one message larger than it is",
         old="            missing = delta - 1",
         new="            missing = delta",
     ),
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="reconciliation is no longer needed once one clean message arrives",
         old="        if delta == 1:\n            return None",
         new="        if delta == 1:\n            self._needs_reconciliation = False\n            return None",
     ),
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="a counter wrap is a gap of four billion messages",
         old="        elif last >= UINT32 - WRAP_MARGIN and seq < WRAP_MARGIN:",
         new="        elif False:",
     ),
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="the first message on a topic implies everything before it was lost",
         old="        if last is None:\n            return None",
         new="        if last is None:\n            last = 0",
     ),
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="a duplicated message counts as a lost one",
         old="        if delta == 0:\n            state.duplicates += 1",
         new="        if delta == 0:\n            state.missing_total += 1\n            state.duplicates += 1",
     ),
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="a publisher restart needs no reconciliation",
         old="            state.restarts += 1\n            self._needs_reconciliation = True",
         new="            state.restarts += 1",
     ),
     Mutation(
-        module="sequence.py",
+        module="match/sequence.py",
         describes="every topic shares one sequence counter",
         old="        state = self._topics[topic]",
         new='        state = self._topics["shared"]',
     ),
     # ── tx.py: it parses bytes we do not control ────────────────────────────────────────────
     Mutation(
-        module="tx.py",
+        module="match/tx.py",
         describes="a txid is the hash of the raw bytes, witness included",
         old="    preimage = raw if not has_witness else raw[:4] + raw[6:witness_start] + raw[-4:]",
         new="    preimage = raw",
     ),
     Mutation(
-        module="tx.py",
+        module="match/tx.py",
         describes="a coinbase input is a spend like any other",
         old="        inputs=() if is_coinbase else tuple(inputs),",
         new="        inputs=tuple(inputs),",
     ),
     Mutation(
-        module="tx.py",
+        module="match/tx.py",
         describes="every output believes it is at index zero",
         old="    for vout in range(n_out):",
         new="    for vout in [0] * n_out:",
     ),
     Mutation(
-        module="tx.py",
+        module="match/tx.py",
         describes="bytes left over after the last field are fine",
         old='    if r.pos != len(raw):\n        raise MalformedTransaction("trailing bytes after transaction")',
         new="    pass",
     ),
     # ── keys.py: the keyed hashes are the privacy claim ─────────────────────────────────────
     Mutation(
-        module="keys.py",
+        module="match/keys.py",
         describes="scriptPubKeys and outpoints are hashed in the same domain",
         old='    return hmac.new(key, tag + b"\\x00" + payload, hashlib.sha256).digest()',
         new="    return hmac.new(key, payload, hashlib.sha256).digest()",
     ),
     Mutation(
-        module="keys.py",
+        module="match/keys.py",
         describes="an outpoint uses the display byte order",
         old='    return txid + struct.pack("<I", vout)',
         new='    return txid[::-1] + struct.pack("<I", vout)',
     ),
     Mutation(
-        module="keys.py",
+        module="match/keys.py",
         describes="a coin is identified by its txid alone, ignoring which output it is",
         old="    return _tagged(k_match, TAG_OUTPOINT, canonical_outpoint(txid, vout))",
         new="    return _tagged(k_match, TAG_OUTPOINT, txid)",
     ),
     Mutation(
-        module="keys.py",
+        module="match/keys.py",
         describes="both subkeys derive from the same info string",
         old="        store=hkdf(master, INFO_STORE),",
         new="        store=hkdf(master, INFO_MATCH),",
     ),
     Mutation(
-        module="keys.py",
+        module="match/keys.py",
         describes="a master secret of any length is acceptable",
         old="    if len(master) < MIN_MASTER_BYTES:",
         new="    if False:",
     ),
     # ── matcher.py: the compare-and-update loop ─────────────────────────────────────────────
     Mutation(
-        module="matcher.py",
+        module="match/matcher.py",
         describes="a coin arriving at a watched script is not tracked",
         old="                self._index.add_outpoint(item_id, new_op)",
         new="                pass",
     ),
     Mutation(
-        module="matcher.py",
+        module="match/matcher.py",
         describes="a spent coin stays in the live set forever",
         old="                self._index.drop_outpoint(item_id, op_h)",
         new="                pass",
     ),
     Mutation(
-        module="matcher.py",
+        module="match/matcher.py",
         describes="one item is reported once per matching output rather than once",
         old="                if item_id not in incoming:\n                    incoming.append(item_id)",
         new="                incoming.append(item_id)",
     ),
     Mutation(
-        module="matcher.py",
+        module="match/matcher.py",
         describes="informational matches are reported ahead of alarms",
         old=(
             "            [Match(i, Direction.OUTGOING) for i in outgoing]\n"
@@ -221,13 +222,13 @@ MUTATIONS: list[Mutation] = [
     ),
     # ── stream.py: the seam between a source and the loop ───────────────────────────────────
     Mutation(
-        module="stream.py",
+        module="match/stream.py",
         describes="one unparseable message takes the whole loop down",
         old="        except MalformedTransaction:\n            self.malformed += 1\n            return ()",
         new="        except MalformedTransaction:\n            raise",
     ),
     Mutation(
-        module="stream.py",
+        module="match/stream.py",
         describes="topics we do not decode have their sequence numbers ignored",
         old="        anomaly = self.tracker.observe(message.topic, message.seq)",
         new=(
@@ -236,14 +237,114 @@ MUTATIONS: list[Mutation] = [
         ),
     ),
     Mutation(
-        module="stream.py",
+        module="match/stream.py",
         describes="anomalies are counted but never announced to the caller",
         old="        if anomaly is not None and self._on_anomaly is not None:",
         new="        if False:",
     ),
+    # ── node/rpc.py: it holds the credentials and reads the node's own words ────────────────
+    Mutation(
+        module="node/rpc.py",
+        describes="an rpc error stringifies to the node's message, descriptor and all",
+        old='        # Deliberately not the node\'s message: this string lands in logs and tracebacks.\n        return f"rpc error {self.code}"',
+        new="        return self.message",
+    ),
+    Mutation(
+        module="node/rpc.py",
+        describes="repr includes the credentials",
+        old='        return f"{type(self).__name__}({self._host}:{self._port})"',
+        new='        return f"{type(self).__name__}({self._host}:{self._port} {self._auth})"',
+    ),
+    Mutation(
+        module="node/rpc.py",
+        describes="an error body is ignored, so a rejected call looks successful",
+        old='        error = payload.get("error")',
+        new="        error = None",
+    ),
+    # ── node/supervisor.py: every path here owes the node an abort ──────────────────────────
+    Mutation(
+        module="node/supervisor.py",
+        describes="a scan left running by a dead process is not aborted at startup",
+        old="        if self._abort_scan():\n            self.orphans_aborted += 1",
+        new="        if False:\n            self.orphans_aborted += 1",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="shutdown walks away from the scan in flight",
+        old="        if self._scan_in_flight.is_set():",
+        new="        if False:",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="the queue is unbounded, so enrolment promises a wait nobody is told about",
+        old="queue.Queue(maxsize=queue_maxsize)",
+        new="queue.Queue()",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="queued requests are abandoned rather than failed on shutdown",
+        old='        self._drain_queue(ScanFailed("supervisor shut down"))',
+        new="        pass",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="a batch grows past its cap",
+        old="        while len(batch) < self.batch_max:\n            try:\n                item = self._queue.get_nowait()",
+        new="        while True:\n            try:\n                item = self._queue.get_nowait()",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="one descriptor per request, so a shared script is scanned twice",
+        old="        descriptors = [f\"raw({spk.hex()})\" for spk in by_spk]",
+        new="        descriptors = [f\"raw({r.spk.hex()})\" for r in live]",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="every request in a batch receives every coin the batch found",
+        old=(
+            "        for spk, requests in by_spk.items():\n"
+            "            outcome = tuple(found[spk])\n"
+            "            for request in requests:\n"
+            "                request.future.set_result(outcome)"
+        ),
+        new=(
+            "        everything = tuple(u for coins in found.values() for u in coins)\n"
+            "        for requests in by_spk.values():\n"
+            "            for request in requests:\n"
+            "                request.future.set_result(everything)"
+        ),
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="scan results keep the display byte order the RPC hands back",
+        old='                    txid=bytes.fromhex(entry["txid"])[::-1],  # RPC gives display order',
+        new='                    txid=bytes.fromhex(entry["txid"]),',
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="a scan failure carries the node's message, and the descriptor in it",
+        old='            self._fail(live, ScanFailed("node rejected the scan", exc.code))',
+        new="            self._fail(live, ScanFailed(exc.message, exc.code))",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="a malformed result entry is skipped, leaving a short baseline that looks real",
+        old=(
+            "            except (KeyError, ValueError, TypeError):\n"
+            '                self._fail(live, ScanFailed("scan result was malformed"))\n'
+            "                return"
+        ),
+        new="            except (KeyError, ValueError, TypeError):\n                continue",
+    ),
+    Mutation(
+        module="node/supervisor.py",
+        describes="an unsuccessful scan is read as an empty baseline",
+        old='        if not isinstance(result, dict) or not result.get("success"):',
+        new="        if False:",
+    ),
     # ── known equivalent mutant ─────────────────────────────────────────────────────────────
     Mutation(
-        module="matcher.py",
+        module="match/matcher.py",
         describes="outputs are matched before inputs",
         survives=True,
         why=(
