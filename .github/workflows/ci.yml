@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install -r requirements-dev.txt
+      - name: Test
+        run: pytest
+      - name: Lint
+        run: ruff check src tests tools
+
+  fixtures:
+    # The fixtures must stay reproducible from their seed. If regenerating changes a byte,
+    # something captured real data -- which CONTRIBUTING.md 4 forbids.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate fixtures and require them unchanged
+        run: |
+          python tools/make_fixtures.py
+          git diff --exit-code tests/fixtures/

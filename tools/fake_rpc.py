@@ -109,7 +109,7 @@ def make_handler(scan_delay: float):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", 0))
             try:
                 req = json.loads(self.rfile.read(length) or b"{}")
