@@ -5,3 +5,7 @@ pyzmq>=25.0    # ZMQ stream replay (tools/replay_zmq.py)
 
 # tools/fake_rpc.py and tools/make_fixtures.py are stdlib-only, by design —
 # a contributor can run the RPC fixture with nothing installed at all.
+
+# Test + lint
+pytest>=8.0
+ruff>=0.5
