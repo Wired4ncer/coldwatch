@@ -59,7 +59,7 @@ be. What cannot be cloned is a public track record.
 
 | Component | State |
 |---|---|
-| Detection engine | design complete, build not started |
+| Detection engine | matching loop built and tested offline; reconciliation and live sockets still to come |
 | Data source | verified working against the target node |
 | Enrolment / payment / delivery | not started |
 | Deployment | none |
