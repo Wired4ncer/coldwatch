@@ -8,3 +8,6 @@ CONTRIBUTING.md       @Wired4ncer
 /src/coldwatch/match/     @Wired4ncer
 /src/coldwatch/storage/   @Wired4ncer
 /src/coldwatch/channels/  @Wired4ncer
+
+# Holds the node credentials, and sends watched scripts to the node as descriptors.
+/src/coldwatch/node/      @Wired4ncer
