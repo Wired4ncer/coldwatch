@@ -60,7 +60,7 @@ be. What cannot be cloned is a public track record.
 | Component | State |
 |---|---|
 | Detection engine | matching loop, block handling, chain catch-up and the live ZMQ sockets built and tested. UTXO-set reconciliation and reorg repair wait on enrolment |
-| Proven against a real node | the sockets and the transaction parser — 254 live mainnet transactions, none malformed. **The block path and chain catch-up have run only against fixtures** |
+| Proven against a real node | sockets, parser, block handling and chain catch-up. An induced gap of six blocks was repaired against the production node: the deposit and the spend were both in blocks the subscriber never received, and the alarm fired from the refetch. 68,000+ live mainnet transactions parsed, none malformed |
 | Enrolment / payment / delivery | not started |
 | Deployment | none |
 
