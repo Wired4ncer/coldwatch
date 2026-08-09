@@ -59,8 +59,8 @@ be. What cannot be cloned is a public track record.
 
 | Component | State |
 |---|---|
-| Detection engine | matching loop, block handling, chain catch-up and the live ZMQ sockets all built and tested; UTXO-set reconciliation waits on enrolment |
-| Data source | verified working against the target node |
+| Detection engine | matching loop, block handling, chain catch-up and the live ZMQ sockets built and tested. UTXO-set reconciliation and reorg repair wait on enrolment |
+| Proven against a real node | the sockets and the transaction parser — 254 live mainnet transactions, none malformed. **The block path and chain catch-up have run only against fixtures** |
 | Enrolment / payment / delivery | not started |
 | Deployment | none |
 

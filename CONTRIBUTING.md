@@ -75,8 +75,14 @@ this repository. That is deliberate.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt        # pyzmq, for the stream replay
+pip install -e .                           # the package, plus pyzmq — its one runtime dependency
+pip install -r requirements-dev.txt        # pytest, ruff
 ```
+
+The runtime has exactly one third-party dependency, `pyzmq`, because bitcoind publishes over ZMQ
+and there is no standard-library client. Everything else is standard library on purpose,
+including the transaction parser — see [SECURITY.md](SECURITY.md). Adding a second runtime
+dependency is a decision, not a convenience, and belongs in a pull request that argues for it.
 
 Then:
 
