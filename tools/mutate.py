@@ -419,6 +419,89 @@ MUTATIONS: list[Mutation] = [
         old='        if not isinstance(result, dict) or not result.get("success"):',
         new="        if False:",
     ),
+    # ── reconcile.py: the repair, and the failures it must not paper over ───────────────────
+    Mutation(
+        module="reconcile.py",
+        describes="a block that does not follow the tip is applied anyway, gap and all",
+        old="        if self.tip is None or block.prev_hash == self.tip.hash:",
+        new="        if True:",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="catch-up fetches the gap but stops one block short of the tip",
+        old="        for height in range(self.tip.height + 1, target):",
+        new="        for height in range(self.tip.height + 1, target - 1):",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="fetched blocks are applied newest first",
+        old="            blocks.append(fetched)",
+        new="            blocks.insert(0, fetched)",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="a reorged-out tip is treated as an ordinary gap and chained through",
+        old='        if not self._on_active_chain(self.tip.hash):\n            raise ReorgDetected("the last applied block is no longer on the active chain")',
+        new="        pass",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="fetched blocks are trusted by height without chaining them together",
+        old='            if fetched.prev_hash != expected_parent:',
+        new="            if False:",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="a competing block one above the tip is applied as though it followed",
+        old='        parent = blocks[-1].block_hash if blocks else self.tip.hash\n        if block.prev_hash != parent:',
+        new="        parent = blocks[-1].block_hash if blocks else self.tip.hash\n        if blocks and block.prev_hash != parent:",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="a block already applied is applied a second time",
+        old="        if self._already_applied(block):",
+        new="        if False:",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="the tip advances to a block before it has been applied",
+        old="    def _advance(self, block: Block) -> Iterator[Block]:\n        yield block\n        self.tip = ChainTip(hash=block.block_hash, height=self._height_of(block))",
+        new="    def _advance(self, block: Block) -> Iterator[Block]:\n        self.tip = ChainTip(hash=block.block_hash, height=self._height_of(block))\n        yield block",
+        survives=True,
+        why=(
+            "The generator is consumed by a `for` loop that applies each block as it is "
+            "yielded, so the tip assignment happens after the caller has applied the previous "
+            "block either way -- the reordering only moves it within the same suspension "
+            "point. It would matter if a caller collected the generator into a list before "
+            "applying anything, which is exactly why blocks_to_apply is a generator and is "
+            "documented as one. A test could only catch this by asserting on tip state from "
+            "inside a partially-consumed iteration, which asserts on the mechanism rather "
+            "than on any behaviour a caller can observe."
+        ),
+    ),
+    Mutation(
+        module="match/stream.py",
+        describes="a failed catch-up leaves the record behind with the flag cleared",
+        old="            self.tracker.flag_for_reconciliation()\n            self.catch_up_failures += 1\n            raise",
+        new="            self.tracker.reconciled()\n            self.catch_up_failures += 1\n            raise",
+    ),
+    Mutation(
+        module="match/stream.py",
+        describes="the reconciliation flag is cleared on the attempt rather than the result",
+        survives=True,
+        why=(
+            "Equivalent, and worth recording because it looks like it should not be. Clearing "
+            "the flag before the work still leaves every exit in the same state: the success "
+            "path clears it again in the `else` branch, and the failure path re-raises it in "
+            "`except`. Nothing reads the flag in between -- applying a block touches the "
+            "matcher and the seen-set, never the tracker -- so no caller can observe the "
+            "window. It becomes a real bug the moment anything inside the loop consults the "
+            "flag, or the `except` narrows to a type that lets some failure through, which is "
+            "why the ordering in the source is the safe one regardless."
+        ),
+        old="        try:\n            for due in self._expand(block):\n                alerts.extend(self._apply_block(due))",
+        new="        try:\n            self.tracker.reconciled()\n            for due in self._expand(block):\n                alerts.extend(self._apply_block(due))",
+    ),
     # ── known equivalent mutant ─────────────────────────────────────────────────────────────
     Mutation(
         module="match/matcher.py",

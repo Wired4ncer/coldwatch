@@ -27,7 +27,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
-from .block import MalformedBlock, parse_block
+from .block import Block, MalformedBlock, parse_block
 from .matcher import Match, Matcher
 from .sequence import Anomaly, SequenceTracker
 from .tx import MalformedTransaction, parse_tx
@@ -116,11 +116,20 @@ class StreamIngest:
         tracker: SequenceTracker | None = None,
         on_anomaly: Callable[[Anomaly], None] | None = None,
         seen: SeenTransactions | None = None,
+        expand_block: Callable[[Block], Iterable[Block]] | None = None,
     ) -> None:
         self.matcher = matcher
         self.tracker = tracker if tracker is not None else SequenceTracker()
         self.seen = seen if seen is not None else SeenTransactions()
         self._on_anomaly = on_anomaly
+        self._expand = expand_block
+        """Given the block that arrived, yields every block the record still owes, in order.
+
+        A hook rather than an import: repair needs the node's RPC, and nothing under `match/`
+        talks to the node — that is what lets this whole package be exercised against fixtures
+        with no network at all. `reconcile.ChainFollower.blocks_to_apply` is what goes here in
+        the service; `None` means "apply exactly what arrives", which is the fixture path.
+        """
         self.parsed = 0
         self.malformed = 0
         self.ignored = 0
@@ -132,6 +141,9 @@ class StreamIngest:
         self.suppressed = 0
         """Confirmations whose alert the mempool already sent. Expected to be most of them —
         a number near zero means the transaction stream is not arriving."""
+        self.catch_up_failures = 0
+        """Times the record was left knowingly behind the chain. Never expected to be
+        non-zero, and the one counter here that should page someone."""
 
     def handle(self, message: StreamMessage) -> tuple[Match, ...]:
         """Process one message. Never raises on bad payload bytes.
@@ -171,11 +183,7 @@ class StreamIngest:
         return matches
 
     def _handle_block(self, body: bytes) -> tuple[Match, ...]:
-        """Confirmation: fold every transaction into the record, alert on what is new.
-
-        Matching and applying alternate per transaction rather than in two passes, so a coin
-        that arrives and is spent again inside the same block is seen doing both.
-        """
+        """Confirmation: fold every transaction into the record, alert on what is new."""
         try:
             block = parse_block(body)
         except MalformedBlock:
@@ -186,6 +194,36 @@ class StreamIngest:
             self.tracker.flag_for_reconciliation()
             return ()
 
+        if self._expand is None:
+            return self._apply_block(block)
+
+        alerts: list[Match] = []
+        try:
+            for due in self._expand(block):
+                alerts.extend(self._apply_block(due))
+        except Exception:
+            # Deliberately broad, and not a shortcut. Every way of failing to produce the
+            # blocks the record owes has the same meaning — the record is now knowingly behind
+            # the chain — and that meaning is what the flag carries. Narrowing this to the
+            # repair layer's own exception type would let a bug there pass for health.
+            #
+            # Whatever was applied before the failure stands; the repair layer's tip stops
+            # where the applying stopped, so the next attempt resumes rather than restarts.
+            self.tracker.flag_for_reconciliation()
+            self.catch_up_failures += 1
+            raise
+        else:
+            # Only once the blocks are actually applied. Clearing on the attempt rather than
+            # the result would turn a failing repair into a silent one (invariant I5).
+            self.tracker.reconciled()
+        return tuple(alerts)
+
+    def _apply_block(self, block: Block) -> tuple[Match, ...]:
+        """Fold one block's transactions into the record.
+
+        Matching and applying alternate per transaction rather than in two passes, so a coin
+        that arrives and is spent again inside the same block is seen doing both.
+        """
         self.blocks += 1
         alerts: list[Match] = []
         for tx in block.transactions:

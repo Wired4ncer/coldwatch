@@ -23,7 +23,7 @@ from coldwatch.match import (
     spk_hmac,
 )
 from coldwatch.match.tx import COINBASE_VOUT, NULL_TXID
-from support import PREV, build_tx, spk
+from support import PREV, build_block, build_tx, coinbase_tx, spk
 
 COLD = spk(0xC0)
 OTHER = spk(0x11)
@@ -248,28 +248,35 @@ def test_anomalies_reach_the_caller(matcher):
 # ── what a dropped message actually costs ───────────────────────────────────────────────────
 
 
-def test_a_dropped_funding_transaction_disarms_the_alarm_on_the_spend(matcher, index):
-    """The failure invariant I4 is about, made concrete.
+def test_a_dropped_funding_transaction_costs_latency_and_not_the_record(matcher, index):
+    """The failure invariant I4 is about — and what the write rule did to it.
 
-    The funding transaction is dropped by the stream — nothing here is broken, ZMQ simply
-    discarded it at the high-water mark. The coin therefore never enters the live set, so
-    when it is spent the input matches nothing and **no alarm fires**. The user is not told.
+    The funding transaction is dropped by the stream. Nothing here is broken; ZMQ discarded it
+    at the high-water mark. **The mempool alert for the deposit is gone for good** — no repair
+    recovers a moment that has passed, and that is the real, permanent cost of a drop.
 
-    This is why reconciliation is a v1 requirement and not later hardening: no improvement to
-    the matching loop can recover an event it was never handed. What the loop *can* do is
-    know it is now unreliable, which is the assertion at the end.
+    What is *not* lost any more is the record. Blocks are the only writer, so the coin is armed
+    when the funding transaction confirms, and the spend that follows alarms normally. Before
+    the write rule this test asserted the opposite: the spend matched nothing and the user was
+    never told, because a dropped `rawtx` was a hole in the record itself.
 
-    ⚠️ When the reconciler lands, this test should start failing on the alarm assertion. That
-    is the signal it works — rewrite it then to assert the repair, and do not simply delete it.
+    The gap still raises the flag. A drop means something was missed even when the record
+    survives it, and `tests/test_reconcile.py` covers the drop that *does* cost correctness —
+    a lost block.
     """
     funding = build_tx([(PREV, 0)], [COLD])
     spend = build_tx([(parse_tx(funding).txid, 0)], [OTHER])
 
     ingest = StreamIngest(matcher)
     ingest.handle(StreamMessage("rawtx", build_tx([(PREV, 9)], [OTHER]), 1))
-    # seq 2 was the funding transaction. It never arrives.
-    matches = ingest.handle(StreamMessage("rawtx", spend, 3))
-
-    assert matches == ()
-    assert index.outpoint_count == 0
+    # seq 2 was the funding transaction. It never arrives, and no alert is ever sent for it.
+    assert ingest.handle(StreamMessage("rawtx", spend, 3)) == ()
     assert ingest.tracker.needs_reconciliation is True
+
+    # The block carrying both arrives. The record catches up, and the spend is announced.
+    alerts = ingest.handle(
+        StreamMessage("rawblock", build_block([coinbase_tx(), funding, spend]), 1)
+    )
+
+    assert alerts == (Match(1, Direction.INCOMING), Match(1, Direction.OUTGOING))
+    assert index.outpoint_count == 0  # arrived and left, both seen

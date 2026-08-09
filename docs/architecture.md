@@ -47,6 +47,7 @@ POST /enroll                              1. validate address → derive scriptP
     channels[] }                          3. queue a baseline scan job → item PENDING
                                           4. label_ct = AEAD(k_store, label)
                                              dest_ct  = AEAD(k_store, channel dest)
+                                             spk_ct   = AEAD(k_store, spk)  ← §4, reconciliation
                                           5. drop plaintext
                                           6. mint capability token (32 random bytes),
                                              store only sha256(token)
@@ -94,6 +95,9 @@ CREATE TABLE watch_item (
   watch_id      INTEGER NOT NULL REFERENCES watch(id),
   chain         TEXT NOT NULL,
   spk_hmac      BLOB NOT NULL,            -- NOT unique: two tenants may watch one address
+  spk_ct        BLOB NOT NULL,            -- AEAD(k_store, spk). Reconciliation rebuilds the
+                                          -- descriptor from this; the HMAC above is one-way,
+                                          -- so without it there is nothing to scan for (§4).
   label_ct      BLOB NOT NULL,
   incoming_mode TEXT NOT NULL DEFAULT 'info',     -- info|mute (outgoing is always alarm)
   status        TEXT NOT NULL DEFAULT 'arming',   -- arming|active|paused|stopped
@@ -218,6 +222,34 @@ See invariant I4. Three requirements:
    takes minutes, so the tip will often have moved on underneath it. Comparing a snapshot taken
    at height *h* against a record that has since advanced past *h* manufactures divergences that
    never existed on any chain — every block confirmed during the scan looks like a discrepancy.
+
+   ⚠️ **The UTXO-set diff needs a schema change that is decided but not yet built.**
+   `scantxoutset` takes descriptors; a descriptor contains the scriptPubKey; the schema stores
+   `spk_hmac`, which is one-way. There is nothing to reconstruct a descriptor from, so the diff
+   cannot be implemented until the script is recoverable.
+
+   **Decided: an `spk_ct` column, `AEAD(k_store, spk)`.** The published claim is unaffected —
+   the database alone stays unmatchable noise, because ciphertext without the key is noise. Nor
+   does it meaningfully move the database-**plus**-master case, which §3b already classes as
+   total: an attacker holding `k_match` can hash any candidate script and test it against the
+   public UTXO set, so every watched script that holds coins is already recoverable with
+   effort. This turns recoverable-with-effort into readable, under a compromise that was
+   already conceded.
+
+   Rejected: a whole-UTXO-set walk (`dumptxoutset`). It needs no plaintext at rest at all,
+   which is genuinely stronger, but costs a multi-gigabyte dump plus HMACing ~166M outputs
+   every pass — on a host chosen for being lean — and reconciles every tenant at once rather
+   than per item.
+
+4. **Chain catch-up**, which is what actually repairs the measured failure and needs neither of
+   the above. Under the write rule a dropped `rawtx` costs alert *latency* and nothing else —
+   the block that confirms it writes the record regardless. A dropped `rawblock` is what costs
+   correctness, and it is repaired by noticing that the block in hand is not the child of the
+   last one applied and fetching the difference by height. No descriptors, no scan, no plaintext.
+
+   What it cannot do is survive a **reorg**: the record keeps no per-block provenance, so there
+   is nothing to roll back, and it stops and says so rather than pretending. Closing that needs
+   the UTXO-set diff above.
 
    ⚠️ **The read timeout must exceed the scan.** A short timeout cancels nothing; it abandons a
    scan that keeps running, so a conservatively short value *causes* the orphan it appears to
