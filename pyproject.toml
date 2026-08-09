@@ -9,7 +9,11 @@ description = "A tripwire for cold storage"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    # The only runtime dependency, and the only one the design has room for: the ZMQ client
+    # for bitcoind's publisher. Everything else here is stdlib on purpose -- see SECURITY.md.
+    "pyzmq>=25",
+]
 
 [project.urls]
 Homepage = "https://github.com/Wired4ncer/coldwatch"

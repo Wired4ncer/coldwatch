@@ -59,7 +59,7 @@ be. What cannot be cloned is a public track record.
 
 | Component | State |
 |---|---|
-| Detection engine | matching loop built and tested offline; reconciliation and live sockets still to come |
+| Detection engine | matching loop, block handling, chain catch-up and the live ZMQ sockets all built and tested; UTXO-set reconciliation waits on enrolment |
 | Data source | verified working against the target node |
 | Enrolment / payment / delivery | not started |
 | Deployment | none |
