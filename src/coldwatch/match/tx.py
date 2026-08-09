@@ -25,6 +25,7 @@ __all__ = [
     "Transaction",
     "TxOutput",
     "parse_tx",
+    "read_tx",
 ]
 
 #: A coinbase input references this outpoint, which does not exist. It must never be looked
@@ -120,20 +121,37 @@ def _dsha256(data: bytes) -> bytes:
 
 
 def parse_tx(raw: bytes) -> Transaction:
-    """Parse a raw transaction, legacy or segwit.
+    """Parse a raw transaction, legacy or segwit. The buffer must hold exactly one.
 
     The fixtures are witness-free, but a live node publishes segwit transactions constantly,
     so the two paths are tested against each other rather than assumed equivalent.
     """
+    tx, end = read_tx(raw, 0)
+    if end != len(raw):
+        raise MalformedTransaction("trailing bytes after transaction")
+    return tx
+
+
+def read_tx(raw: bytes, start: int) -> tuple[Transaction, int]:
+    """Parse one transaction beginning at ``start``; return it and the offset just past it.
+
+    A block is a header followed by transactions back to back, with no length prefix on any of
+    them — the only way to find the second one is to have parsed the first exactly. So the
+    parser reports where it stopped, and `parse_tx` is the special case that additionally
+    insists nothing follows.
+    """
     r = _Reader(raw)
+    r.pos = start
+    if start > len(raw):
+        raise MalformedTransaction("transaction starts past the end of the buffer")
     r.uint32()  # version — parsed to advance, not used
 
     # BIP144: a segwit transaction inserts a 0x00 marker and a non-zero flag after the
     # version. The marker is unambiguous because a legacy transaction with zero inputs is
     # invalid, so a 0x00 in that position cannot be an input count.
     has_witness = False
-    if len(raw) >= 6 and raw[4] == 0x00:
-        if raw[5] == 0x00:
+    if len(raw) >= start + 6 and raw[start + 4] == 0x00:
+        if raw[start + 5] == 0x00:
             raise MalformedTransaction("segwit marker with zero flag")
         r.take(2)
         has_witness = True
@@ -167,19 +185,26 @@ def parse_tx(raw: bytes) -> Transaction:
             for _ in range(r.count(1)):
                 r.take(r.count(1))
 
+    locktime_start = r.pos
     r.uint32()  # locktime
-    if r.pos != len(raw):
-        raise MalformedTransaction("trailing bytes after transaction")
+    end = r.pos
 
     # The txid is the hash of the *witness-stripped* serialisation: version, the input and
     # output sections, locktime. Strip by slicing rather than re-serialising, which would
     # mean carrying every field — including the amounts this module refuses to expose.
-    preimage = raw if not has_witness else raw[:4] + raw[6:witness_start] + raw[-4:]
+    preimage = (
+        raw[start:end]
+        if not has_witness
+        else raw[start : start + 4] + raw[start + 6 : witness_start] + raw[locktime_start:end]
+    )
 
-    return Transaction(
-        txid=_dsha256(preimage),
-        inputs=() if is_coinbase else tuple(inputs),
-        outputs=tuple(outputs),
-        is_coinbase=is_coinbase,
-        has_witness=has_witness,
+    return (
+        Transaction(
+            txid=_dsha256(preimage),
+            inputs=() if is_coinbase else tuple(inputs),
+            outputs=tuple(outputs),
+            is_coinbase=is_coinbase,
+            has_witness=has_witness,
+        ),
+        end,
     )
