@@ -28,7 +28,7 @@ jobs:
 
   mutations:
     # A green suite says the code does something. It does not say the tests would object if
-    # the code did the wrong thing instead. This breaks the code on purpose, 50 ways, and
+    # the code did the wrong thing instead. This breaks the code on purpose, 60 ways, and
     # requires each one to turn the suite red -- see tools/mutate.py.
     #
     # Runs on every pull request rather than only when src/coldwatch/match/ changes: the

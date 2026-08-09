@@ -219,6 +219,28 @@ See invariant I4. Three requirements:
    at height *h* against a record that has since advanced past *h* manufactures divergences that
    never existed on any chain — every block confirmed during the scan looks like a discrepancy.
 
+   ⛔ **The UTXO-set diff is blocked on the schema, and the block below is what ships instead.**
+   `scantxoutset` takes descriptors; a descriptor contains the scriptPubKey; the schema stores
+   `spk_hmac`, which is one-way. There is nothing to reconstruct a descriptor from, so the diff
+   as written cannot be implemented at all. The two ways out are both decisions, not code:
+
+   - an `spk_ct` column under `k_store`, recoverable only with the master key — which keeps
+     "the database alone is unmatchable noise" true, and changes nothing about the
+     database-plus-master case, since an attacker holding `k_match` can already hash any
+     candidate script and test it against the public UTXO set;
+   - a whole-UTXO-set walk (`dumptxoutset`), which needs no plaintext at rest at all and costs
+     a multi-gigabyte dump plus HMACing every output, on a host chosen for being lean.
+
+4. **Chain catch-up**, which is what actually repairs the measured failure and needs neither of
+   the above. Under the write rule a dropped `rawtx` costs alert *latency* and nothing else —
+   the block that confirms it writes the record regardless. A dropped `rawblock` is what costs
+   correctness, and it is repaired by noticing that the block in hand is not the child of the
+   last one applied and fetching the difference by height. No descriptors, no scan, no plaintext.
+
+   What it cannot do is survive a **reorg**: the record keeps no per-block provenance, so there
+   is nothing to roll back, and it stops and says so rather than pretending. Closing that needs
+   the UTXO-set diff above.
+
    ⚠️ **The read timeout must exceed the scan.** A short timeout cancels nothing; it abandons a
    scan that keeps running, so a conservatively short value *causes* the orphan it appears to
    prevent. 900 s for the scan call, 30 s for control calls.
