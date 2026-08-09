@@ -1,7 +1,9 @@
-# Development and test dependencies.
-# The service itself is not packaged yet; this is what the tools in tools/ need.
+# Development and test dependencies — on top of the package itself.
+# Install the package too (`pip install -e .`): the tests import coldwatch, and pyzmq is now
+# declared there as a RUNTIME dependency rather than a tooling one.
 
-pyzmq>=25.0    # ZMQ stream replay (tools/replay_zmq.py)
+pyzmq>=25.0    # also a runtime dependency now — see pyproject.toml and SECURITY.md.
+               # Used by the live subscriber, and by tools/replay_zmq.py.
 
 # tools/fake_rpc.py and tools/make_fixtures.py are stdlib-only, by design —
 # a contributor can run the RPC fixture with nothing installed at all.

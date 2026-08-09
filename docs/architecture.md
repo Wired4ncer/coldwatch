@@ -354,9 +354,81 @@ A token-authenticated nuke endpoint deletes everything for a tenant immediately.
 ## 7. Build order
 
 1. **Ingest core** — two SUB sockets, sequence-gap detection, reconciliation, scan supervisor
-   with abort-on-death. *The risk lives here.*
+   with abort-on-death. *The risk lives here.* — **built, except the UTXO-set diff**
 2. **Channel abstraction** + the Nostr implementation (proves the delivery pipeline cheaply).
+   — contract built; implementations open ([#3](https://github.com/Wired4ncer/coldwatch/issues/3))
 3. **Email channel** + postfix hardening (the reach rail, and the harder one).
+   — open ([#2](https://github.com/Wired4ncer/coldwatch/issues/2),
+   [#22](https://github.com/Wired4ncer/coldwatch/issues/22); they ship together or not at all)
 4. **Enrolment API** + capability tokens + the arming state machine.
+   — open ([#23](https://github.com/Wired4ncer/coldwatch/issues/23))
 5. **Payment** — Lightning, prepaid balance, drip debit.
 6. **Watchdog** on separate infrastructure, plus the public uptime page.
+
+### Where the ingest core actually stands
+
+| Piece | State |
+|---|---|
+| Sequence-gap detection, transaction parsing, HMAC matching | built |
+| Confirmed-only write rule (§4) | built |
+| Block parsing, mempool/confirmation de-duplication | built |
+| Chain catch-up — refetch blocks the stream dropped | built |
+| Two live SUB sockets | built |
+| Scan supervisor — queue, batching, abort-on-death | built (mechanism only) |
+| **UTXO-set diff and reorg repair** | **blocked on enrolment writing `spk_ct`** ([#21](https://github.com/Wired4ncer/coldwatch/issues/21)) |
+| `ARMING` state, test-fire ordering | with the enrolment API |
+
+Two things are built but **not yet proven against a live node**, and the distinction is the
+point of writing them down: the block path and chain catch-up have only ever run against
+fixtures and a fake chain. A repair path that has never run against a real node is not known to
+work. Issue [#24](https://github.com/Wired4ncer/coldwatch/issues/24) closes on an *induced* gap,
+repaired, not on a clean run.
+
+---
+
+## 8. What the node must provide
+
+Everything here is read-only. The service never sends a transaction, never touches a wallet, and
+never asks the node to do anything that changes state.
+
+### ZMQ
+
+```
+zmqpubrawblock=tcp://127.0.0.1:28332
+zmqpubrawtx=tcp://127.0.0.1:28333
+```
+
+Two endpoints, subscribed on **two separate sockets** — see §4. The high-water mark on both
+sides is worth setting deliberately: the default of 1000 is the setting under which ~832
+transactions were measured lost across 3 gaps in 40 minutes. Raising it reduces loss and cannot
+eliminate it, which is why reconciliation exists rather than being an optimisation.
+
+### RPC
+
+Exactly four methods, and the whitelist should grant no more:
+
+| Method | Used for |
+|---|---|
+| `scantxoutset` | the enrolment baseline, and later the UTXO-set diff |
+| `getblockhash` | finding a block by height during catch-up |
+| `getblock` | fetching a dropped block (verbosity 0) and reading a height (verbosity 1) |
+| `getblockchaininfo` / `getblockcount` | liveness and tip checks |
+
+⚠️ **`getblockheader` is deliberately not used**, even though it is the natural call for reading
+a height and a confirmation count. `getblock` at verbosity 1 returns both, and keeping the
+whitelist one method narrower is worth more than the extra bytes: the whitelist is the
+difference between a compromised service being able to *read* the chain and being able to *act*
+on the node. This was found the expensive way — the obvious implementation passed every test
+against a fake and would have failed on first contact with a whitelisted node.
+
+Under `rpcwhitelistdefault=0` a whitelist that omits a method the code calls produces a failure
+that no offline test can predict. **Check the code's calls against the deployed whitelist when
+either changes.**
+
+### Pruning
+
+A pruned node is sufficient and archival buys nothing — there is no `txindex`, no history read,
+and no arbitrary txid lookup anywhere in the design. The one real constraint: **the prune target
+is the catch-up window.** Blocks below the prune height cannot be refetched, so a service down
+longer than that window cannot repair itself from blocks and fails loudly rather than pretending.
+At a 50 GiB target that window measured ~29,000 blocks, roughly 200 days.
