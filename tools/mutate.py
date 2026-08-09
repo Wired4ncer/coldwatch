@@ -502,6 +502,37 @@ MUTATIONS: list[Mutation] = [
         old="        try:\n            for due in self._expand(block):\n                alerts.extend(self._apply_block(due))",
         new="        try:\n            self.tracker.reconciled()\n            for due in self._expand(block):\n                alerts.extend(self._apply_block(due))",
     ),
+    # ── subscribe.py: the live end ──────────────────────────────────────────────────────────
+    Mutation(
+        module="subscribe.py",
+        describes="one socket for both topics, so a 1.7 MB block queues in front of the stream",
+        old='        socket.setsockopt(zmq.SUBSCRIBE, topic)',
+        new='        socket.setsockopt(zmq.SUBSCRIBE, b"")',
+    ),
+    Mutation(
+        module="subscribe.py",
+        describes="the receive buffer is left at the ZMQ default the loss was measured under",
+        old="        socket.setsockopt(zmq.RCVHWM, rcvhwm)",
+        new="        socket.setsockopt(zmq.RCVHWM, 1000)",
+    ),
+    Mutation(
+        module="subscribe.py",
+        describes="transactions are drained before the blocks that arm the coins they spend",
+        old="        for socket in (self._block, self._tx):",
+        new="        for socket in (self._tx, self._block):",
+    ),
+    Mutation(
+        module="subscribe.py",
+        describes="the sequence counter is read from the payload part",
+        old="        topic, body, seq = parts",
+        new="        topic, seq, body = parts",
+    ),
+    Mutation(
+        module="subscribe.py",
+        describes="an envelope with no counter is passed on as though it could be checked",
+        old="        if len(parts) != TOPIC_PARTS:\n            self.malformed_envelopes += 1\n            return None",
+        new="        if len(parts) != TOPIC_PARTS:\n            parts = [*parts, b\"\\x00\" * 4][:3]",
+    ),
     # ── known equivalent mutant ─────────────────────────────────────────────────────────────
     Mutation(
         module="match/matcher.py",

@@ -75,9 +75,27 @@ the document claims — that is a real report and worth sending.
 
 **Also out of scope:** denial of service and traffic flooding; social engineering; physical
 access; automated scanner output with no demonstrated impact; and dependency CVEs with no
-reachable path — the runtime has **no third-party dependencies at all**
-([`pyproject.toml`](pyproject.toml) declares none), so a dependency finding here is almost
-certainly about the development tooling.
+reachable path.
+
+**On dependencies.** This document previously said the runtime had no third-party dependencies
+at all. That stopped being true when the live ZMQ subscriber landed, and the sentence is
+replaced rather than deleted, because what it was really claiming — a supply chain small enough
+to read — is still the design goal and should be checkable against reality.
+
+The runtime now has **exactly one** third-party dependency, declared in
+[`pyproject.toml`](pyproject.toml):
+
+| Package | Why it is here | What it can reach |
+|---|---|---|
+| `pyzmq` | bitcoind publishes over ZMQ; there is no stdlib client, and reimplementing the wire protocol would be a worse risk than the dependency | Two localhost SUB sockets on our own node. It is handed no keys, no database, and no destinations. |
+
+Everything else is standard library on purpose, including the transaction parser — sixty lines
+rather than a parsing library, because the hot path of a service whose pitch is that it holds
+nothing worth stealing is a poor place for someone else's code. Development tooling (pytest,
+ruff) is not runtime and is not in that count.
+
+A dependency finding is therefore in scope if it is against `pyzmq` **and** you can describe the
+reachable path; otherwise it is almost certainly about the development tooling.
 
 ---
 
