@@ -154,6 +154,16 @@ class SequenceTracker:
         """
         return self._needs_reconciliation
 
+    def flag_for_reconciliation(self) -> None:
+        """Demand a pass for a reason that is not a sequence anomaly.
+
+        The counter is not the only way to learn the record may be behind. A block that fails
+        to parse costs every confirmation in it, and under the confirmed-only write rule
+        (docs/architecture.md §4) that is the record silently falling behind a chain whose
+        sequence numbers were perfectly contiguous throughout.
+        """
+        self._needs_reconciliation = True
+
     def reconciled(self) -> None:
         """Called by the reconciler *after* a successful pass over the UTXO set.
 

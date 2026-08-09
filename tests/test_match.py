@@ -168,7 +168,7 @@ def messages(*raws: bytes, start: int = 1) -> list[StreamMessage]:
     return [StreamMessage("rawtx", raw, start + i) for i, raw in enumerate(raws)]
 
 
-def test_ingest_runs_the_whole_path(matcher):
+def test_ingest_runs_the_whole_path(matcher, index):
     funding = build_tx([(PREV, 0)], [COLD])
     spend = build_tx([(parse_tx(funding).txid, 0)], [OTHER])
 
@@ -179,6 +179,9 @@ def test_ingest_runs_the_whole_path(matcher):
     ]
     assert ingest.parsed == 2
     assert ingest.tracker.needs_reconciliation is False
+    # Both alerts fired, and the record was not touched by either: the coin was armed in
+    # memory, which is the whole of what the mempool is allowed to do.
+    assert index.outpoint_count == 0
 
 
 def test_the_recorded_stream_matches_nothing_by_accident(matcher, contiguous_stream):
@@ -201,15 +204,32 @@ def test_one_unparseable_message_does_not_stop_the_loop(matcher):
 
 
 def test_other_topics_are_not_parsed_but_are_still_counted(matcher):
-    """Block handling is not built yet. A gap in the block stream still matters, so the
-    counter is tracked from the start rather than from whenever that lands."""
+    """A topic this ingest does not decode. Its sequence numbers are still tracked, because a
+    gap on a topic we ignore is still evidence the transport is dropping messages."""
     ingest = StreamIngest(matcher)
-    ingest.handle(StreamMessage("rawblock", b"not a transaction", 1))
-    ingest.handle(StreamMessage("rawblock", b"still not one", 3))
+    ingest.handle(StreamMessage("hashblock", b"\x00" * 32, 1))
+    ingest.handle(StreamMessage("hashblock", b"\x11" * 32, 3))
 
     assert ingest.ignored == 2
     assert ingest.malformed == 0
-    assert ingest.tracker.state("rawblock").missing_total == 1
+    assert ingest.tracker.state("hashblock").missing_total == 1
+
+
+def test_an_unparseable_block_forces_a_reconciliation(matcher):
+    """A skipped transaction costs one alert. A skipped *block* costs every confirmation in
+    it, and blocks are the only thing that writes the record — so the record is now behind the
+    chain by an unknown amount, on a stream whose sequence numbers never skipped a beat.
+
+    Counting it and moving on would leave that condition invisible. Only reconciliation can
+    put it right, so failing to parse one has to reach the reconciler.
+    """
+    ingest = StreamIngest(matcher)
+
+    assert ingest.handle(StreamMessage("rawblock", b"not a block", 1)) == ()
+
+    assert ingest.malformed == 1
+    assert ingest.blocks == 0
+    assert ingest.tracker.needs_reconciliation is True
 
 
 def test_anomalies_reach_the_caller(matcher):

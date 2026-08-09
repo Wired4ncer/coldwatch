@@ -13,6 +13,7 @@ the reconciler exists, `SequenceTracker.needs_reconciliation` is a flag nobody c
 
 from __future__ import annotations
 
+from .block import Block, MalformedBlock, parse_block
 from .keys import (
     Subkeys,
     canonical_outpoint,
@@ -25,19 +26,28 @@ from .keys import (
 )
 from .matcher import InMemoryWatchIndex, Match, Matcher, WatchIndex
 from .sequence import Anomaly, AnomalyKind, SequenceTracker, TopicState, parse_seq_part
-from .stream import TOPIC_BLOCK, TOPIC_TX, StreamIngest, StreamMessage
-from .tx import MalformedTransaction, OutPoint, Transaction, TxOutput, parse_tx
+from .stream import (
+    TOPIC_BLOCK,
+    TOPIC_TX,
+    SeenTransactions,
+    StreamIngest,
+    StreamMessage,
+)
+from .tx import MalformedTransaction, OutPoint, Transaction, TxOutput, parse_tx, read_tx
 
 __all__ = [
     "TOPIC_BLOCK",
     "TOPIC_TX",
     "Anomaly",
     "AnomalyKind",
+    "Block",
     "InMemoryWatchIndex",
+    "MalformedBlock",
     "MalformedTransaction",
     "Match",
     "Matcher",
     "OutPoint",
+    "SeenTransactions",
     "SequenceTracker",
     "StreamIngest",
     "StreamMessage",
@@ -50,8 +60,10 @@ __all__ = [
     "derive_subkeys",
     "hkdf",
     "outpoint_hmac",
+    "parse_block",
     "parse_seq_part",
     "parse_tx",
+    "read_tx",
     "spk_hmac",
     "txid_from_display",
     "txid_to_display",

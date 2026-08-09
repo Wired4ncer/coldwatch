@@ -102,7 +102,10 @@ CREATE TABLE watch_item (
 );
 CREATE INDEX idx_item_spk ON watch_item(spk_hmac);
 
-CREATE TABLE utxo (                       -- live outpoint set, for spend detection
+CREATE TABLE utxo (                       -- CONFIRMED outpoints only; written by blocks alone
+                                          -- (§4). Mempool-only coins live in memory and never
+                                          -- reach this table: reconciliation compares it
+                                          -- against scantxoutset, which cannot see them.
   item_id       INTEGER NOT NULL REFERENCES watch_item(id),
   outpoint_hmac BLOB NOT NULL,
   PRIMARY KEY (item_id, outpoint_hmac)
