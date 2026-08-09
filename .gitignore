@@ -32,3 +32,6 @@ build/
 .DS_Store
 *.swp
 *.log
+
+# tools/mutate.py crash journal — never committed; it holds a copy of a source file
+.mutate-journal.json
