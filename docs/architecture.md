@@ -150,12 +150,54 @@ ZMQ rawtx / rawblock  (two separate SUB sockets — see below)
   → parse transaction
   → for each INPUT outpoint:  HMAC → lookup utxo       → OUTGOING (alarm)
   → for each OUTPUT spk:      HMAC → lookup watch_item → INCOMING (informational)
-       └─ on hit: insert the new outpoint HMAC into utxo, keeping the set live
-  → on OUTGOING: delete the spent outpoint from utxo
   → enqueue outbox rows → delivery workers
+  → if this arrived in a BLOCK: apply it to the utxo set
+       └─ spent outpoints deleted, new outputs to watched scripts inserted
 ```
 
 Pure HMAC-and-compare. Plaintext chain data is public and is never persisted.
+
+### The stream alerts; only confirmations write
+
+**`rawtx` never mutates the stored UTXO set. `rawblock` does, and nothing else does.** A
+mempool transaction produces the alert — that is the product, and the latency is the point —
+but it leaves the record alone until it confirms.
+
+This is not caution about unconfirmed transactions. It is what makes reconciliation *decidable*
+at all. `scantxoutset` reads the chainstate, so it reports confirmed state and nothing else.
+If the record were written on first sight, then every reconciliation pass would have to
+distinguish two indistinguishable cases:
+
+| We hold / node holds | If the record is confirmed-only | If the record is written on first sight |
+|---|---|---|
+| Node has it, we don't | We missed an INCOMING → insert | …or it is simply not confirmed yet |
+| **We have it, node doesn't** | **We missed an OUTGOING → alarm** | …or we recorded an unconfirmed receipt |
+
+The second row is the alarm — the one signal this service exists to produce. Under a
+first-sight record, an unconfirmed *receipt* looks exactly like a missed *spend*, so
+reconciliation would fire false alarms on the flagship path. And the reverse case is just as
+bad: reconciling after an unconfirmed spend but before it confirms would read the still-unspent
+coin as a missed incoming, **resurrect it into the record**, and then alarm a second time when
+the spend confirms.
+
+There is no way to check the disputed coin against the node's mempool, either. **We hold
+outpoints only as HMACs, and an HMAC is one-way** — we cannot reconstruct a txid to ask
+`gettxout` about. Reconciliation runs in exactly one direction: take the node's plaintext
+unspents, HMAC them, diff. So the ambiguity cannot be resolved after the fact by asking; it has
+to be excluded by construction, which is what a confirmed-only record does.
+
+Storing "last seen at" per outpoint to quarantine recent ones is **not** an option: timestamps
+at rest re-correlate the HMACs against public chain data, which is the exposure DESIGN §3b
+exists to close.
+
+Two consequences to implement, not to remember:
+
+- **De-duplication is required.** The same transaction is seen twice — once in the mempool, once
+  in a block — and must alert once. The seen-set is in memory only (see above: no timestamps at
+  rest). After a restart, a transaction caught mid-confirmation may alert twice; a duplicate
+  alert is a far cheaper failure than a missed one.
+- **RBF and never-confirming transactions become free.** A replaced spend alerts (correctly — the
+  coins were being moved) but never enters the record, so nothing has to be un-written.
 
 ### This loop must not assume it sees everything
 
@@ -168,6 +210,15 @@ See invariant I4. Three requirements:
 3. **Periodic reconciliation against the UTXO set**, repairing what the stream missed. This is a
    v1 requirement, not later hardening. Test it by *inducing* a gap — `tests/fixtures/with-gap.jsonl`
    exists for exactly this.
+
+   Anchor the diff to a height. `scantxoutset` returns the `bestblock` it finished on, and it
+   takes minutes, so the tip will often have moved on underneath it. Comparing a snapshot taken
+   at height *h* against a record that has since advanced past *h* manufactures divergences that
+   never existed on any chain — every block confirmed during the scan looks like a discrepancy.
+
+   ⚠️ **The read timeout must exceed the scan.** A short timeout cancels nothing; it abandons a
+   scan that keeps running, so a conservatively short value *causes* the orphan it appears to
+   prevent. 900 s for the scan call, 30 s for control calls.
 
 The block handler additionally re-processes transactions for confirmation tracking and for
 catch-up after downtime: on restart, rescan blocks since the last seen height.
