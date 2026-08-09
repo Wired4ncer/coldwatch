@@ -590,6 +590,32 @@ MUTATIONS: list[Mutation] = [
         old=INPUTS_LOOP + "\n" + OUTPUTS_LOOP,
         new=OUTPUTS_LOOP + "\n" + INPUTS_LOOP,
     ),
+    # ── channels/email.py: the privacy posture of the first delivery rail ───────────────────
+    Mutation(
+        module="channels/email.py",
+        describes="the subject line varies with the alert, becoming a side channel",
+        old='        message["Subject"] = SUBJECT',
+        new='        message["Subject"] = SUBJECT if alert.kind is not AlertKind.MOVEMENT '
+        'else f"{SUBJECT}: {alert.kind.value}"',
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a permanent SMTP failure (5xx) is retried as though it were transient",
+        old="            retriable = 400 <= exc.smtp_code < 500",
+        new="            retriable = exc.smtp_code >= 400",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="the destination leaks into the log-facing detail on a recipient refusal",
+        old='            return DeliveryResult(ok=False, retriable=False, detail="recipient refused")',
+        new='            return DeliveryResult(ok=False, retriable=False, detail=f"recipient refused: {dest}")',
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="validate_dest stores whatever case the user typed instead of a canonical form",
+        old="        return candidate.lower()",
+        new="        return candidate",
+    ),
 ]
 
 
