@@ -180,8 +180,27 @@ def run(rpc, blocks_back: int) -> int:
     index = InMemoryWatchIndex([(1, spk_hmac(k_match, spk))])
     matcher = Matcher(k_match, index)
 
-    behind = window[created_index - 1] if created_index > 0 else window[0]
-    behind_height = start + max(created_index - 1, 0)
+    # The follower must start on the block *before* the deposit, because a follower treats its
+    # own tip as already applied. Starting *on* the deposit's block leaves it outside the
+    # induced gap, so it is never applied, the deposit is never seen, and the spend that
+    # follows matches nothing — which reads exactly like a broken reconciler and is not one.
+    # Measured against the real chain the first time this ran: the coin found was in the first
+    # block of the window, and `max(created_index - 1, 0)` quietly clamped onto it.
+    if created_index > 0:
+        behind = window[created_index - 1]
+        behind_height = start + created_index - 1
+    else:
+        try:
+            _, behind = fetch_block(rpc, start - 1)
+        except RpcError as exc:
+            print(
+                f"\nthe coin is in the first block of the window and the block before it "
+                f"({start - 1}) could not be read (rpc {exc.code}). Try a larger --blocks.",
+                file=sys.stderr,
+            )
+            return 2
+        behind_height = start - 1
+
     follower = ChainFollower(
         rpc,
         tip=ChainTip(hash=behind.block_hash, height=behind_height),
@@ -228,7 +247,14 @@ def run(rpc, blocks_back: int) -> int:
             Direction.OUTGOING in directions,
             f"directions {[d.value for d in directions]}",
         ),
-        ("the coin left the record when spent", index.outpoint_count == 0, f"{index.outpoint_count} left"),
+        (
+            # Conditioned on the deposit, deliberately. An empty outpoint set is also what you
+            # get when nothing was ever added, so on its own this check passes for the wrong
+            # reason — which it did, on the first real run, while the two checks above failed.
+            "the coin left the record when spent",
+            Direction.INCOMING in directions and index.outpoint_count == 0,
+            f"{index.outpoint_count} left, incoming seen: {Direction.INCOMING in directions}",
+        ),
         (
             f"the follower ended at the tip ({tip_height})",
             follower.tip is not None and follower.tip.height == tip_height,

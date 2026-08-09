@@ -63,6 +63,32 @@ def test_the_proof_passes_against_a_chain_that_contains_a_spend(chain_with_a_spe
     assert "FAIL" not in out
 
 
+def test_a_coin_in_the_first_block_of_the_window_is_still_inside_the_gap(capsys):
+    """The case the first real run hit, and the reason it reported a failure that was not one.
+
+    A follower treats its own tip as already applied. If the coin is created in the first block
+    of the window and the follower starts *on* that block, the deposit is never applied, the
+    spend matches nothing, and the output looks exactly like a broken reconciler. The follower
+    has to start on the block *before* the window in that case.
+    """
+    chain = FakeChain()
+    chain.add([])                 # index 0 — before the window, and where the follower starts
+    funding = build_tx([(PREV, 0)], [COLD])
+    chain.add([funding])          # index 1 — the first block of the window
+    from coldwatch.match import parse_tx
+
+    chain.add([build_tx([(parse_tx(funding).txid, 0)], [OTHER])])
+    chain.add([])
+    chain.add([])                 # index 4 — the tip
+
+    # blocks_back=3 puts the window at indices 1..4, so the deposit is in its first block.
+    assert run(chain, blocks_back=3) == 0
+
+    out = capsys.readouterr().out
+    assert "PASS  the deposit was seen (INCOMING)" in out
+    assert "FAIL" not in out
+
+
 class BreaksAfterTheSurvey:
     """A node that serves the survey and then stops serving blocks.
 
