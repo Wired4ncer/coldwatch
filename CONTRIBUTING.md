@@ -100,6 +100,13 @@ python tools/fake_rpc.py --port 18332 --scan-delay 186
 python tools/mutate.py
 ```
 
+One tool is **not** in that list because it cannot be: `tools/induced_gap_proof.py` needs a real
+node and real credentials, and exists to close the one question the fixtures cannot answer — does
+chain catch-up repair an induced gap against real blocks. Its logic is still covered offline
+(`tests/test_induced_gap_proof.py` drives it against a fake chain), because a script whose first
+run is also its first test is one whose typos surface at a production shell prompt. It reads its
+password from the environment or a file, never from an argument.
+
 **On `--scan-delay 186`:** that is the real measured duration of a `scantxoutset` against the
 production node, not a pessimistic guess. The scan walks the entire UTXO set (~166M outputs), so
 it does not get faster with a better-chosen address, and it grows over time. Enrolment must be

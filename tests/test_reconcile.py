@@ -74,6 +74,9 @@ class FakeChain:
         if self.unreachable:
             raise RpcTransportError("node unreachable")
 
+        if method == "getblockcount":
+            return self.height_of(len(self.raw) - 1)
+
         if method == "getblockhash":
             index = int(params[0]) - self.start_height  # type: ignore[arg-type]
             if not 0 <= index < len(self.raw):
