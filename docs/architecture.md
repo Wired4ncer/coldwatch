@@ -378,11 +378,23 @@ A token-authenticated nuke endpoint deletes everything for a tenant immediately.
 | **UTXO-set diff and reorg repair** | **blocked on enrolment writing `spk_ct`** ([#21](https://github.com/Wired4ncer/coldwatch/issues/21)) |
 | `ARMING` state, test-fire ordering | with the enrolment API |
 
-Two things are built but **not yet proven against a live node**, and the distinction is the
-point of writing them down: the block path and chain catch-up have only ever run against
-fixtures and a fake chain. A repair path that has never run against a real node is not known to
-work. Issue [#24](https://github.com/Wired4ncer/coldwatch/issues/24) closes on an *induced* gap,
-repaired, not on a clean run.
+Chain catch-up is **proven against the production node**, not only against fixtures
+([#24](https://github.com/Wired4ncer/coldwatch/issues/24)): a six-block gap was induced, the
+follower refetched exactly the missed blocks, and a deposit and its spend — both in blocks the
+subscriber never received — produced INCOMING and then OUTGOING. Reproduce with
+`tools/induced_gap_proof.py`.
+
+What is still **not** proven live, and should not be claimed:
+
+- **Reorg handling.** Detected and refused rather than repaired, and a reorg cannot be induced
+  to order. Closing it needs the UTXO-set diff ([#21](https://github.com/Wired4ncer/coldwatch/issues/21)).
+- **Drop behaviour under load.** The sockets have been watched live without a single dropped
+  message, which says nothing about a period that does drop them
+  ([#25](https://github.com/Wired4ncer/coldwatch/issues/25)).
+- **The RPC whitelist, dynamically.** The proof authenticated with the node's cookie, which
+  bypasses `rpcwhitelist`. Compatibility was checked statically instead — every method the code
+  calls appears in the configured line — which is sound for a per-method list but is inspection,
+  not a live run.
 
 ---
 
