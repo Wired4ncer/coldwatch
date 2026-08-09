@@ -122,8 +122,17 @@ class ChainFollower:
         reach. That is why this is a generator: the alternative, returning a list, invites a
         caller to apply them in a loop that cannot report where it stopped.
         """
-        if self.tip is None or block.prev_hash == self.tip.hash:
-            yield from self._advance(block)
+        if self.tip is None:
+            # Nothing to be behind, and nothing to count from — this is the only time the
+            # height has to be asked for on the ordinary path.
+            yield from self._advance(block, self._height_of(block))
+            return
+
+        if block.prev_hash == self.tip.hash:
+            # The child of what we applied is one above it, by definition. Asking the node
+            # would be a round trip per block to be told what we already know, on the path
+            # that runs every ten minutes forever.
+            yield from self._advance(block, self.tip.height + 1)
             return
 
         if self._already_applied(block):
@@ -133,23 +142,25 @@ class ChainFollower:
             return
 
         self.catch_ups += 1
-        for missing in self._fetch_gap(block):
-            yield from self._advance(missing)
-        yield from self._advance(block)
+        target = self._height_of(block)
+        for missing in self._fetch_gap(block, target):
+            # The tip has advanced by the time each of these is evaluated, so the heights
+            # count up from where we were rather than all landing on the same one.
+            yield from self._advance(missing, self.tip.height + 1)
+        yield from self._advance(block, target)
 
-    def _advance(self, block: Block) -> Iterator[Block]:
+    def _advance(self, block: Block, height: int) -> Iterator[Block]:
         yield block
-        self.tip = ChainTip(hash=block.block_hash, height=self._height_of(block))
+        self.tip = ChainTip(hash=block.block_hash, height=height)
 
     def _already_applied(self, block: Block) -> bool:
         assert self.tip is not None
         return block.block_hash == self.tip.hash
 
-    def _fetch_gap(self, block: Block) -> list[Block]:
+    def _fetch_gap(self, block: Block, target: int) -> list[Block]:
         """The blocks between our tip and ``block``, oldest first."""
         assert self.tip is not None
 
-        target = self._height_of(block)
         if not self._on_active_chain(self.tip.hash):
             raise ReorgDetected("the last applied block is no longer on the active chain")
 
@@ -209,32 +220,46 @@ class ChainFollower:
 
         The coinbase carries one under BIP34, but reading it would mean trusting a field from
         the very stream that is under suspicion here, and the node knows the answer for certain.
+
+        Only ever asked on the catch-up path and for the very first block, so the round trip is
+        rare by construction — see `blocks_to_apply`, which counts heights locally while the
+        blocks arrive in order.
         """
-        header = self._header(block.block_hash)
         try:
-            return int(header["height"])
+            return int(self._describe(block.block_hash)["height"])
         except (KeyError, TypeError, ValueError):
-            raise CatchUpFailed("block header carried no usable height") from None
+            raise CatchUpFailed("block description carried no usable height") from None
 
     def _on_active_chain(self, block_hash: bytes) -> bool:
         """Whether a block we already applied is still part of the best chain.
 
-        `getblockheader` reports negative confirmations for a block that has been reorged out,
-        which is the only in-band way to learn that the ground moved under the record.
+        The node reports negative confirmations for a block that has been reorged out, which is
+        the only in-band way to learn that the ground moved under the record.
         """
-        header = self._header(block_hash)
         try:
-            return int(header["confirmations"]) >= 0
+            return int(self._describe(block_hash)["confirmations"]) >= 0
         except (KeyError, TypeError, ValueError):
-            raise CatchUpFailed("block header carried no usable confirmation count") from None
+            raise CatchUpFailed("block description carried no usable confirmation count") from None
 
-    def _header(self, block_hash: bytes) -> dict:
+    def _describe(self, block_hash: bytes) -> dict:
+        """Height and confirmations for a block, via `getblock` at verbosity 1.
+
+        ⚠️ **`getblockheader` is the natural call here and is deliberately not used.** The
+        node's RPC whitelist for this service grants `getblock` and not `getblockheader`, so the
+        obvious version of this fails against the real node while passing every test — a fake
+        answers whatever it is asked. Verbosity 1 returns the same two fields plus a list of
+        txids we ignore; that is a larger response, and it buys not having to widen a whitelist
+        or restart a node that other things depend on.
+
+        Keeping the whitelist narrow is worth more than the bytes: it is the difference between
+        a compromised service being able to read the chain and being able to act on the node.
+        """
         try:
-            header = self._rpc.call("getblockheader", block_hash[::-1].hex())
+            described = self._rpc.call("getblock", block_hash[::-1].hex(), 1)
         except RpcError as exc:
-            raise CatchUpFailed(f"node refused a block header (rpc {exc.code})") from None
+            raise CatchUpFailed(f"node refused a block description (rpc {exc.code})") from None
         except RpcTransportError:
-            raise CatchUpFailed("node unreachable fetching a block header") from None
-        if not isinstance(header, dict):
-            raise CatchUpFailed("block header did not come back as an object")
-        return header
+            raise CatchUpFailed("node unreachable fetching a block description") from None
+        if not isinstance(described, dict):
+            raise CatchUpFailed("block description did not come back as an object")
+        return described

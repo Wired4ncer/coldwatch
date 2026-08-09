@@ -81,20 +81,21 @@ class FakeChain:
             return parse_block(self.raw[index]).block_hash[::-1].hex()
 
         if method == "getblock":
-            index = self._index_of(bytes.fromhex(str(params[0]))[::-1])
+            block_hash = bytes.fromhex(str(params[0]))[::-1]
+            verbosity = int(params[1]) if len(params) > 1 else 1
+            if verbosity == 1:
+                # The description. Modelled separately from the raw block because the whitelist
+                # grants `getblock` and NOT `getblockheader` -- so this is the only way the
+                # follower is allowed to learn a height, and a fake that answered
+                # `getblockheader` too would hide that.
+                if block_hash in self.abandoned:
+                    return {"height": self.start_height, "confirmations": -1}
+                index = self._index_of(block_hash)
+                return {"height": self.height_of(index), "confirmations": len(self.raw) - index}
+            index = self._index_of(block_hash)
             if self.pruned_below is not None and self.height_of(index) < self.pruned_below:
                 raise RpcError(-1, "Block not available (pruned data)")
             return self.raw[index].hex()
-
-        if method == "getblockheader":
-            block_hash = bytes.fromhex(str(params[0]))[::-1]
-            if block_hash in self.abandoned:
-                return {"height": self.start_height, "confirmations": -1}
-            index = self._index_of(block_hash)
-            return {
-                "height": self.height_of(index),
-                "confirmations": len(self.raw) - index,
-            }
 
         raise RpcError(-32601, f"Method not found: {method}")
 
@@ -132,17 +133,41 @@ def block_msg(raw: bytes, seq: int) -> StreamMessage:
 
 
 def test_a_contiguous_block_is_applied_without_asking_the_node_for_anything(matcher, chain):
-    """Every RPC call during normal operation is a call that can fail during an outage. The
-    follower asks for a height and nothing more when blocks arrive in order."""
+    """Every RPC call during normal operation is a call that can fail during an outage — and
+    this path runs every ten minutes forever. Once the follower knows where it is, the child of
+    the block it applied is one above it *by definition*, so asking would be a round trip to be
+    told what it already knows."""
     follower = ChainFollower(chain)
     ingest = ingest_with(matcher, follower)
 
     ingest.handle(block_msg(chain.add([build_tx([(PREV, 0)], [COLD])]), 1))
+    calls_after_first = len(chain.calls)
     ingest.handle(block_msg(chain.add([]), 2))
+    ingest.handle(block_msg(chain.add([]), 3))
 
-    assert ingest.blocks == 2
+    assert ingest.blocks == 3
     assert follower.fetched == 0
-    assert set(chain.calls) == {"getblockheader"}
+    assert len(chain.calls) == calls_after_first, "a contiguous block asked the node something"
+
+
+def test_the_follower_never_calls_getblockheader(matcher, chain):
+    """The node's RPC whitelist grants `getblock` and **not** `getblockheader`. The obvious
+    implementation uses the latter, passes every test against a fake that answers anything, and
+    fails against the real node — which is exactly how it was caught, by reading the whitelist
+    rather than by running the suite.
+
+    Asserted rather than remembered, because the natural call is the forbidden one.
+    """
+    follower = ChainFollower(chain)
+    ingest = ingest_with(matcher, follower)
+    ingest.handle(block_msg(chain.add([]), 1))
+
+    chain.add([])
+    delivered = chain.add([])
+    ingest.handle(block_msg(delivered, 2))
+
+    assert "getblockheader" not in chain.calls
+    assert set(chain.calls) <= {"getblock", "getblockhash"}
 
 
 def test_the_tip_advances_with_what_was_applied(matcher, chain):

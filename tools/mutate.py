@@ -20,14 +20,38 @@ This is not a substitute for writing tests first; it answers a different questio
 test first proves it fails when the code is *absent*. This proves it fails when the code is
 *plausibly wrong*, which is the failure mode that actually ships.
 
-⚠️ **This tool edits files in place and restores them afterwards.** It restores on crash and on
-Ctrl-C too, but do not run it with unsaved work in `src/coldwatch/match/`.
+⚠️ **This tool edits files in place and restores them afterwards.** It restores on exceptions,
+on Ctrl-C, and on SIGTERM; if it is killed in a way it cannot intercept, the *next* run restores
+what was left behind before doing anything else. Details under "Leaving a mutation behind" below.
+
+## Leaving a mutation behind
+
+A sweep is a loop that writes broken code to disk on purpose. The restore is the only thing
+standing between that and a source tree quietly containing, say, a disabled key-length check —
+which is what happened on 2026-08-09 and is why this section exists.
+
+`try/finally` covers exceptions and Ctrl-C, and does **not** cover SIGTERM, which is what
+`timeout` sends, what CI sends when a job is cancelled, and what most process supervisors send
+first. A sweep run as `timeout 900 python tools/mutate.py` that hits its limit therefore left
+the last mutation applied, silently, with no non-zero exit to notice — the shell reports 124 and
+the tree looks fine until something fails much later for an unrelated-looking reason.
+
+Two defences, in the order they matter:
+
+1. **A handler for SIGTERM and SIGINT**, so the ordinary kill paths restore.
+2. **A journal on disk**, written before each mutation and cleared after the restore. SIGKILL,
+   an OOM kill and a power cut cannot be intercepted at all, so the only complete answer to
+   "did a previous run leave something broken?" is to ask on the way *in*. That is the same
+   reasoning as `node/supervisor.py`'s startup abort, for the same reason.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import json
+import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -35,6 +59,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "coldwatch"
+
+#: Records the file being mutated and its original contents, so a run that is killed outright
+#: can be cleaned up by the next one. Deliberately inside the repo rather than in /tmp: a
+#: journal that a reboot clears is a journal that fails exactly when it is needed.
+JOURNAL = ROOT / ".mutate-journal.json"
 
 
 @dataclass(frozen=True)
@@ -422,8 +451,20 @@ MUTATIONS: list[Mutation] = [
     # ── reconcile.py: the repair, and the failures it must not paper over ───────────────────
     Mutation(
         module="reconcile.py",
+        describes="the height of every block is asked of the node instead of counted locally",
+        old="            yield from self._advance(block, self.tip.height + 1)",
+        new="            yield from self._advance(block, self._height_of(block))",
+    ),
+    Mutation(
+        module="reconcile.py",
+        describes="the follower uses getblockheader, which the node's whitelist forbids",
+        old='            described = self._rpc.call("getblock", block_hash[::-1].hex(), 1)',
+        new='            described = self._rpc.call("getblockheader", block_hash[::-1].hex())',
+    ),
+    Mutation(
+        module="reconcile.py",
         describes="a block that does not follow the tip is applied anyway, gap and all",
-        old="        if self.tip is None or block.prev_hash == self.tip.hash:",
+        old="        if block.prev_hash == self.tip.hash:",
         new="        if True:",
     ),
     Mutation(
@@ -465,8 +506,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         module="reconcile.py",
         describes="the tip advances to a block before it has been applied",
-        old="    def _advance(self, block: Block) -> Iterator[Block]:\n        yield block\n        self.tip = ChainTip(hash=block.block_hash, height=self._height_of(block))",
-        new="    def _advance(self, block: Block) -> Iterator[Block]:\n        self.tip = ChainTip(hash=block.block_hash, height=self._height_of(block))\n        yield block",
+        old="    def _advance(self, block: Block, height: int) -> Iterator[Block]:\n        yield block\n        self.tip = ChainTip(hash=block.block_hash, height=height)",
+        new="    def _advance(self, block: Block, height: int) -> Iterator[Block]:\n        self.tip = ChainTip(hash=block.block_hash, height=height)\n        yield block",
         survives=True,
         why=(
             "The generator is consumed by a `for` loop that applies each block as it is "
@@ -585,6 +626,46 @@ def apply(mutation: Mutation, original: str) -> str | None:
     return original.replace(mutation.old, mutation.new, 1)
 
 
+def recover() -> str | None:
+    """Restore whatever a killed run left mutated. Returns the path, or None if nothing was.
+
+    Runs before the sweep does anything else. A journal that is only read on the way out is a
+    journal that never runs in the case it exists for.
+    """
+    if not JOURNAL.exists():
+        return None
+    try:
+        record = json.loads(JOURNAL.read_text())
+        Path(record["path"]).write_text(record["original"])
+    except (OSError, ValueError, KeyError):
+        # Say so rather than continue: an unreadable journal means a file may still be broken,
+        # and a sweep starting from a broken tree measures nothing.
+        raise SystemExit(
+            f"{JOURNAL} exists but could not be read. A previous run may have left a mutation "
+            f"applied — check `git diff src/` before running again."
+        ) from None
+    JOURNAL.unlink(missing_ok=True)
+    return record["path"]
+
+
+def _install_restore_on_signal() -> None:
+    """Restore on SIGTERM and SIGINT.
+
+    SIGTERM is the one that matters: `timeout` sends it, CI sends it on cancellation, and
+    Python's `finally` does not run for it. SIGKILL is deliberately absent because it cannot be
+    caught — that is what the journal is for.
+    """
+
+    def handler(signum, frame):
+        recover()
+        # _exit rather than sys.exit: an exception here would unwind through the pytest
+        # subprocess call and could be swallowed, leaving the file broken after all.
+        os._exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, handler)
+
+
 def evaluate(mutation: Mutation) -> Result:
     path = SRC / mutation.module
     original = path.read_text()
@@ -604,11 +685,15 @@ def evaluate(mutation: Mutation) -> Result:
         # mutation is scored as caught — proving only that Python rejects bad syntax.
         return Result(mutation, caught=False, error=f"mutant is not valid Python: {exc}")
 
+    # Journal first, then mutate. The other order has a window in which the file is broken and
+    # nothing on disk records how to put it back — which is the whole failure being fixed.
+    JOURNAL.write_text(json.dumps({"path": str(path), "original": original}))
     try:
         path.write_text(mutated)
         passed, failing = run_pytest()
     finally:
         path.write_text(original)
+        JOURNAL.unlink(missing_ok=True)
     return Result(mutation, caught=not passed, failing=failing)
 
 
@@ -619,6 +704,11 @@ def main() -> int:
     ap.add_argument("--filter", default="", help="only mutations whose module or text matches")
     ap.add_argument("--list", action="store_true", help="list mutations and exit")
     args = ap.parse_args()
+
+    recovered = recover()
+    if recovered is not None:
+        print(f"restored {recovered} — a previous run was killed mid-mutation\n")
+    _install_restore_on_signal()
 
     selected = [
         m
