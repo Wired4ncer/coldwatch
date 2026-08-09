@@ -47,6 +47,7 @@ POST /enroll                              1. validate address → derive scriptP
     channels[] }                          3. queue a baseline scan job → item PENDING
                                           4. label_ct = AEAD(k_store, label)
                                              dest_ct  = AEAD(k_store, channel dest)
+                                             spk_ct   = AEAD(k_store, spk)  ← §4, reconciliation
                                           5. drop plaintext
                                           6. mint capability token (32 random bytes),
                                              store only sha256(token)
@@ -94,6 +95,9 @@ CREATE TABLE watch_item (
   watch_id      INTEGER NOT NULL REFERENCES watch(id),
   chain         TEXT NOT NULL,
   spk_hmac      BLOB NOT NULL,            -- NOT unique: two tenants may watch one address
+  spk_ct        BLOB NOT NULL,            -- AEAD(k_store, spk). Reconciliation rebuilds the
+                                          -- descriptor from this; the HMAC above is one-way,
+                                          -- so without it there is nothing to scan for (§4).
   label_ct      BLOB NOT NULL,
   incoming_mode TEXT NOT NULL DEFAULT 'info',     -- info|mute (outgoing is always alarm)
   status        TEXT NOT NULL DEFAULT 'arming',   -- arming|active|paused|stopped
@@ -219,17 +223,23 @@ See invariant I4. Three requirements:
    at height *h* against a record that has since advanced past *h* manufactures divergences that
    never existed on any chain — every block confirmed during the scan looks like a discrepancy.
 
-   ⛔ **The UTXO-set diff is blocked on the schema, and the block below is what ships instead.**
+   ⚠️ **The UTXO-set diff needs a schema change that is decided but not yet built.**
    `scantxoutset` takes descriptors; a descriptor contains the scriptPubKey; the schema stores
    `spk_hmac`, which is one-way. There is nothing to reconstruct a descriptor from, so the diff
-   as written cannot be implemented at all. The two ways out are both decisions, not code:
+   cannot be implemented until the script is recoverable.
 
-   - an `spk_ct` column under `k_store`, recoverable only with the master key — which keeps
-     "the database alone is unmatchable noise" true, and changes nothing about the
-     database-plus-master case, since an attacker holding `k_match` can already hash any
-     candidate script and test it against the public UTXO set;
-   - a whole-UTXO-set walk (`dumptxoutset`), which needs no plaintext at rest at all and costs
-     a multi-gigabyte dump plus HMACing every output, on a host chosen for being lean.
+   **Decided: an `spk_ct` column, `AEAD(k_store, spk)`.** The published claim is unaffected —
+   the database alone stays unmatchable noise, because ciphertext without the key is noise. Nor
+   does it meaningfully move the database-**plus**-master case, which §3b already classes as
+   total: an attacker holding `k_match` can hash any candidate script and test it against the
+   public UTXO set, so every watched script that holds coins is already recoverable with
+   effort. This turns recoverable-with-effort into readable, under a compromise that was
+   already conceded.
+
+   Rejected: a whole-UTXO-set walk (`dumptxoutset`). It needs no plaintext at rest at all,
+   which is genuinely stronger, but costs a multi-gigabyte dump plus HMACing ~166M outputs
+   every pass — on a host chosen for being lean — and reconciles every tenant at once rather
+   than per item.
 
 4. **Chain catch-up**, which is what actually repairs the measured failure and needs neither of
    the above. Under the write rule a dropped `rawtx` costs alert *latency* and nothing else —
