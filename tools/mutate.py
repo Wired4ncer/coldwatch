@@ -59,33 +59,29 @@ class Mutation:
     """
 
 
-#: The two loops of `Matcher.process`, quoted whole so they can be swapped cleanly. Long
+#: The two loops of `Matcher.match`, quoted whole so they can be swapped cleanly. Long
 #: anchors are a deliberate trade: if either loop is edited the sweep errors rather than
 #: silently skipping, which forces whoever edited it to re-derive the equivalence argument
 #: recorded against the swap below.
 INPUTS_LOOP = """\
         for op in tx.inputs:  # empty for a coinbase: it spends nothing
             op_h = outpoint_hmac(self._k, op.txid, op.vout)
-            for item_id in tuple(self._index.items_owning_outpoint(op_h)):
+            # The record first, then the mempool-only coins. A spend of a deposit that has not
+            # confirmed yet is still a spend, and it is the case the record cannot cover.
+            for item_id in (
+                *self._index.items_owning_outpoint(op_h),
+                *self.provisional.items(op_h),
+            ):
                 if item_id not in outgoing:
                     outgoing.append(item_id)
-                self._index.drop_outpoint(item_id, op_h)
 """
 
 OUTPUTS_LOOP = """\
         for out in tx.outputs:
             spk_h = spk_hmac(self._k, out.spk)
-            items = self._index.items_watching_spk(spk_h)
-            if not items:
-                continue
-            new_op = outpoint_hmac(self._k, tx.txid, out.vout)
-            for item_id in items:
+            for item_id in self._index.items_watching_spk(spk_h):
                 if item_id not in incoming:
                     incoming.append(item_id)
-                # Tracked regardless of the item's alert mode: `mute` suppresses the
-                # notification, not the bookkeeping. A muted deposit that never entered the
-                # UTXO set would be a spend we could not see later.
-                self._index.add_outpoint(item_id, new_op)
 """
 
 
@@ -137,8 +133,14 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         module="match/tx.py",
         describes="a txid is the hash of the raw bytes, witness included",
-        old="    preimage = raw if not has_witness else raw[:4] + raw[6:witness_start] + raw[-4:]",
-        new="    preimage = raw",
+        old="""\
+    preimage = (
+        raw[start:end]
+        if not has_witness
+        else raw[start : start + 4] + raw[start + 6 : witness_start] + raw[locktime_start:end]
+    )
+""",
+        new="    preimage = raw[start:end]\n",
     ),
     Mutation(
         module="match/tx.py",
@@ -155,8 +157,83 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         module="match/tx.py",
         describes="bytes left over after the last field are fine",
-        old='    if r.pos != len(raw):\n        raise MalformedTransaction("trailing bytes after transaction")',
+        old='    if end != len(raw):\n        raise MalformedTransaction("trailing bytes after transaction")',
         new="    pass",
+    ),
+    Mutation(
+        module="match/tx.py",
+        describes="a transaction ends where the last one did, so a block reads the same one forever",
+        old="    locktime_start = r.pos\n    r.uint32()  # locktime\n    end = r.pos",
+        new="    locktime_start = r.pos\n    r.uint32()  # locktime\n    end = start",
+    ),
+    # ── block.py: the only thing that writes the record ─────────────────────────────────────
+    Mutation(
+        module="match/block.py",
+        describes="a block whose transactions do not fill it is parsed anyway, partially",
+        old='    if pos != len(raw):\n        # Trailing bytes mean the count was wrong or a transaction was misparsed, and either\n        # way the transactions we just read are not trustworthy as a set.\n        raise MalformedBlock("trailing bytes after the last transaction")',
+        new="    pass",
+    ),
+    Mutation(
+        module="match/block.py",
+        describes="a block claiming zero transactions is a block",
+        old='    if count == 0:',
+        new="    if False:",
+    ),
+    Mutation(
+        module="match/block.py",
+        describes="the parent hash is read from the wrong header field",
+        old="    prev_hash = header[4:36]",
+        new="    prev_hash = header[36:68]",
+    ),
+    Mutation(
+        module="match/block.py",
+        describes="a transaction that will not parse is skipped, leaving the rest of the block",
+        old="        except MalformedTransaction as exc:\n            raise MalformedBlock(f\"transaction {len(transactions)}: {exc}\") from None",
+        new="        except MalformedTransaction:\n            break",
+    ),
+    # ── stream.py: the write rule itself ────────────────────────────────────────────────────
+    Mutation(
+        module="match/stream.py",
+        describes="the mempool writes the record, so an unconfirmed receipt looks confirmed",
+        old="        matches = self.matcher.match(tx)\n        # Arm what it pays to a watched script, in memory. Without this, a deposit spent again\n        # before it confirms would never be armed at all and the spend would alarm nobody.\n        self.matcher.note_unconfirmed(tx)",
+        new="        matches = self.matcher.match(tx)\n        self.matcher.apply(tx)",
+    ),
+    Mutation(
+        module="match/stream.py",
+        describes="a deposit spent before it confirms is never armed, so the spend alarms nobody",
+        old="        self.matcher.note_unconfirmed(tx)",
+        new="        pass",
+    ),
+    Mutation(
+        module="match/stream.py",
+        describes="a block that will not parse is counted and forgotten",
+        old="            self.tracker.flag_for_reconciliation()",
+        new="            pass",
+    ),
+    Mutation(
+        module="match/stream.py",
+        describes="a confirmation re-alerts what the mempool already announced",
+        old="            if self.seen.add(tx.txid):\n                alerts.extend(matches)\n            else:\n                self.suppressed += 1",
+        new="            alerts.extend(matches)",
+    ),
+    Mutation(
+        module="match/stream.py",
+        describes="a block is applied to the record without being matched first, tx by tx",
+        old="        for tx in block.transactions:\n            matches = self.matcher.match(tx)\n            self.matcher.apply(tx)",
+        new="        for tx in block.transactions:\n            self.matcher.apply(tx)\n            matches = self.matcher.match(tx)",
+    ),
+    # ── matcher.py: the memory-only overlay ─────────────────────────────────────────────────
+    Mutation(
+        module="match/matcher.py",
+        describes="the record keeps a duplicate of a coin the mempool armed, after it confirms",
+        old="        self.provisional.forget(tx.txid)",
+        new="        pass",
+    ),
+    Mutation(
+        module="match/matcher.py",
+        describes="a provisional coin is forgotten by the wrong key, so nothing is ever released",
+        old="        self._drop(self._by_txid.pop(txid, ()))",
+        new="        self._drop(self._by_txid.get(txid, ()))",
     ),
     # ── keys.py: the keyed hashes are the privacy claim ─────────────────────────────────────
     Mutation(
