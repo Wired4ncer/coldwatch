@@ -42,6 +42,10 @@ DEFAULT_PORT = 465  # implicit TLS (SMTPS) — see _default_connect.
 DEFAULT_TIMEOUT = 30.0
 
 ENV_HOST = "COLDWATCH_SMTP_HOST"
+#: This channel only ever speaks implicit TLS (see `_default_connect`) — point this at your
+#: provider's SMTPS port (465 by default), never at the STARTTLS submission port (587) most
+#: providers document. Pointed at 587, the TLS handshake never completes: every send hangs to
+#: `timeout` and comes back `retriable=True` with no clearer diagnostic than that.
 ENV_PORT = "COLDWATCH_SMTP_PORT"
 ENV_USER = "COLDWATCH_SMTP_USER"
 ENV_PASSWORD = "COLDWATCH_SMTP_PASSWORD"
@@ -107,15 +111,18 @@ def _render_body(alert: Alert) -> str:
     label, chain = alert.label, alert.chain
 
     if alert.kind is AlertKind.MOVEMENT:
-        if alert.direction is Direction.OUTGOING:
+        # The alarm is the fallback, not the reassurance: Alert.direction is typed as
+        # `Direction | None`, and nothing upstream of this module enforces that a MOVEMENT
+        # carries one. A None here must read as an alarm, not as a calm deposit notice.
+        if alert.direction is Direction.INCOMING:
             return (
-                f'"{label}" ({chain}) has moved.\n\n'
-                "If you hold other seeds or devices, this is the moment to check them — "
-                "attackers sweep sequentially, and this watch may not be the only one at risk."
+                f'"{label}" ({chain}) received a deposit.\n\n'
+                "Informational only — this is not an emergency."
             )
         return (
-            f'"{label}" ({chain}) received a deposit.\n\n'
-            "Informational only — this is not an emergency."
+            f'"{label}" ({chain}) has moved.\n\n'
+            "If you hold other seeds or devices, this is the moment to check them — "
+            "attackers sweep sequentially, and this watch may not be the only one at risk."
         )
     if alert.kind is AlertKind.TEST_FIRE:
         return (
@@ -224,10 +231,16 @@ class EmailChannel:
         except smtplib.SMTPRecipientsRefused:
             # .recipients on this exception carries the destination back — never touch it here.
             return DeliveryResult(ok=False, retriable=False, detail="recipient refused")
+        except smtplib.SMTPNotSupportedError as exc:
+            # Raised by login() when the server offers none of the AUTH mechanisms it knows.
+            # That is a permanent configuration mismatch, not a subclass of
+            # SMTPResponseException, and retrying cannot make the server support AUTH.
+            return DeliveryResult(ok=False, retriable=False, detail=type(exc).__name__)
         except smtplib.SMTPResponseException as exc:
-            # 4xx is transient by SMTP convention (e.g. greylisting, mailbox temporarily full);
-            # 5xx is permanent (bad auth, unknown user, policy rejection).
-            retriable = 400 <= exc.smtp_code < 500
+            # 5xx is permanent (bad auth, unknown user, policy rejection). Everything else,
+            # including 4xx and a malformed reply that smtplib reports as code -1, is worth a
+            # retry: a garbled response is a transport problem, not a verdict on the message.
+            retriable = exc.smtp_code < 500
             return DeliveryResult(ok=False, retriable=retriable, detail=f"smtp {exc.smtp_code}")
         except smtplib.SMTPException as exc:
             return DeliveryResult(ok=False, retriable=True, detail=type(exc).__name__)

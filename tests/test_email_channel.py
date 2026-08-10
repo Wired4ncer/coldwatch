@@ -167,6 +167,24 @@ def test_auth_failure_is_a_permanent_failure():
     assert result.retriable is False
 
 
+def test_a_malformed_smtp_reply_is_retriable_not_permanent():
+    """smtplib reports a garbled server reply as smtp_code == -1. That is a transport problem,
+    not a verdict on the message, and must not be classified alongside a real 5xx rejection."""
+    fake = FakeSmtp(send_error=smtplib.SMTPDataError(-1, b"garbage"))
+    result = make_channel(fake).send("user@example.com", make_alert())
+    assert result.ok is False
+    assert result.retriable is True
+
+
+def test_no_supported_auth_mechanism_is_a_permanent_failure_not_an_infinite_retry():
+    """SMTPNotSupportedError is not an SMTPResponseException, so it must be caught explicitly
+    — otherwise it falls into the generic transient bucket and is retried forever."""
+    fake = FakeSmtp(login_error=smtplib.SMTPNotSupportedError("AUTH extension not supported"))
+    result = make_channel(fake).send("user@example.com", make_alert())
+    assert result.ok is False
+    assert result.retriable is False
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -256,6 +274,20 @@ def test_outgoing_movement_reads_as_an_alarm_and_incoming_does_not():
     assert "check them" in outgoing_body
     assert "received a deposit" in incoming_body
     assert "not an emergency" in incoming_body
+
+
+def test_movement_with_no_direction_reads_as_an_alarm_not_a_deposit_notice():
+    """Alert.direction is typed Direction | None, and nothing in this module can enforce that
+    a MOVEMENT alert carries one — the layer that builds Alert doesn't exist yet (#23). The
+    alarm must be the default: a theft misclassified as a calm deposit notice is unrecoverable
+    for the user in a way a deposit misclassified as an alarm is not."""
+    fake = FakeSmtp()
+    channel = make_channel(fake)
+    channel.send("user@example.com", make_alert(direction=None))
+
+    body = fake.sent[0].get_content()
+    assert "has moved" in body
+    assert "received a deposit" not in body
 
 
 # ── from_env / MissingConfig ─────────────────────────────────────────────────────────────────

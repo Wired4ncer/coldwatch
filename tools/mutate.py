@@ -601,8 +601,26 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         module="channels/email.py",
         describes="a permanent SMTP failure (5xx) is retried as though it were transient",
-        old="            retriable = 400 <= exc.smtp_code < 500",
-        new="            retriable = exc.smtp_code >= 400",
+        old="            retriable = exc.smtp_code < 500",
+        new="            retriable = True",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a malformed SMTP reply (code -1) is treated as a permanent failure",
+        old="            retriable = exc.smtp_code < 500",
+        new="            retriable = 400 <= exc.smtp_code < 500",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a server that refuses every AUTH mechanism is retried forever",
+        old="""\
+        except smtplib.SMTPNotSupportedError as exc:
+            # Raised by login() when the server offers none of the AUTH mechanisms it knows.
+            # That is a permanent configuration mismatch, not a subclass of
+            # SMTPResponseException, and retrying cannot make the server support AUTH.
+            return DeliveryResult(ok=False, retriable=False, detail=type(exc).__name__)
+""",
+        new="",
     ),
     Mutation(
         module="channels/email.py",
@@ -615,6 +633,12 @@ MUTATIONS: list[Mutation] = [
         describes="validate_dest stores whatever case the user typed instead of a canonical form",
         old="        return candidate.lower()",
         new="        return candidate",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a movement with no direction renders as a reassuring deposit notice",
+        old="        if alert.direction is Direction.INCOMING:",
+        new="        if alert.direction is not Direction.OUTGOING:",
     ),
 ]
 
