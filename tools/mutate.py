@@ -590,6 +590,56 @@ MUTATIONS: list[Mutation] = [
         old=INPUTS_LOOP + "\n" + OUTPUTS_LOOP,
         new=OUTPUTS_LOOP + "\n" + INPUTS_LOOP,
     ),
+    # ── channels/email.py: the privacy posture of the first delivery rail ───────────────────
+    Mutation(
+        module="channels/email.py",
+        describes="the subject line varies with the alert, becoming a side channel",
+        old='        message["Subject"] = SUBJECT',
+        new='        message["Subject"] = SUBJECT if alert.kind is not AlertKind.MOVEMENT '
+        'else f"{SUBJECT}: {alert.kind.value}"',
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a permanent SMTP failure (5xx) is retried as though it were transient",
+        old="            retriable = exc.smtp_code < 500",
+        new="            retriable = True",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a malformed SMTP reply (code -1) is treated as a permanent failure",
+        old="            retriable = exc.smtp_code < 500",
+        new="            retriable = 400 <= exc.smtp_code < 500",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a server that refuses every AUTH mechanism is retried forever",
+        old="""\
+        except smtplib.SMTPNotSupportedError as exc:
+            # Raised by login() when the server offers none of the AUTH mechanisms it knows.
+            # That is a permanent configuration mismatch, not a subclass of
+            # SMTPResponseException, and retrying cannot make the server support AUTH.
+            return DeliveryResult(ok=False, retriable=False, detail=type(exc).__name__)
+""",
+        new="",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="the destination leaks into the log-facing detail on a recipient refusal",
+        old='            return DeliveryResult(ok=False, retriable=False, detail="recipient refused")',
+        new='            return DeliveryResult(ok=False, retriable=False, detail=f"recipient refused: {dest}")',
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="validate_dest stores whatever case the user typed instead of a canonical form",
+        old="        return candidate.lower()",
+        new="        return candidate",
+    ),
+    Mutation(
+        module="channels/email.py",
+        describes="a movement with no direction renders as a reassuring deposit notice",
+        old="        if alert.direction is Direction.INCOMING:",
+        new="        if alert.direction is not Direction.OUTGOING:",
+    ),
 ]
 
 

@@ -4,7 +4,7 @@
 implementable and testable with no node, no database and no network — that is deliberate,
 so this work can proceed independently of the ingest side.
 
-Implemented: none yet. Email (#2) and Nostr (#3) are the first two.
+Implemented: email (#2). Nostr (#3) is next.
 """
 
 from coldwatch.channels.base import (
@@ -15,6 +15,7 @@ from coldwatch.channels.base import (
     Direction,
     PrivacyClass,
 )
+from coldwatch.channels.email import EmailChannel, MissingConfig
 
 __all__ = [
     "Alert",
@@ -22,5 +23,7 @@ __all__ = [
     "Channel",
     "DeliveryResult",
     "Direction",
+    "EmailChannel",
+    "MissingConfig",
     "PrivacyClass",
 ]
