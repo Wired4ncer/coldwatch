@@ -356,10 +356,12 @@ A token-authenticated nuke endpoint deletes everything for a tenant immediately.
 1. **Ingest core** — two SUB sockets, sequence-gap detection, reconciliation, scan supervisor
    with abort-on-death. *The risk lives here.* — **built, except the UTXO-set diff**
 2. **Channel abstraction** + the Nostr implementation (proves the delivery pipeline cheaply).
-   — contract built; implementations open ([#3](https://github.com/Wired4ncer/coldwatch/issues/3))
+   — contract built; Nostr (NIP-17 gift wrap) built
+   ([#3](https://github.com/Wired4ncer/coldwatch/issues/3))
 3. **Email channel** + postfix hardening (the reach rail, and the harder one).
-   — open ([#2](https://github.com/Wired4ncer/coldwatch/issues/2),
-   [#22](https://github.com/Wired4ncer/coldwatch/issues/22); they ship together or not at all)
+   — email channel built ([#2](https://github.com/Wired4ncer/coldwatch/issues/2)); postfix
+   hardening and the mail log/queue purge still open
+   ([#22](https://github.com/Wired4ncer/coldwatch/issues/22))
 4. **Enrolment API** + capability tokens + the arming state machine.
    — open ([#23](https://github.com/Wired4ncer/coldwatch/issues/23))
 5. **Payment** — Lightning, prepaid balance, drip debit.

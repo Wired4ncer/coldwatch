@@ -78,24 +78,27 @@ access; automated scanner output with no demonstrated impact; and dependency CVE
 reachable path.
 
 **On dependencies.** This document previously said the runtime had no third-party dependencies
-at all. That stopped being true when the live ZMQ subscriber landed, and the sentence is
-replaced rather than deleted, because what it was really claiming — a supply chain small enough
-to read — is still the design goal and should be checkable against reality.
+at all, then that it had exactly one. Both sentences were replaced rather than deleted, because
+what they were really claiming — a supply chain small enough to read — is still the design goal
+and should be checkable against reality, not preserved as a stale number.
 
-The runtime now has **exactly one** third-party dependency, declared in
+The runtime now has **three** third-party dependencies, declared in
 [`pyproject.toml`](pyproject.toml):
 
 | Package | Why it is here | What it can reach |
 |---|---|---|
 | `pyzmq` | bitcoind publishes over ZMQ; there is no stdlib client, and reimplementing the wire protocol would be a worse risk than the dependency | Two localhost SUB sockets on our own node. It is handed no keys, no database, and no destinations. |
+| `coincurve` | The Nostr channel's NIP-44 encryption needs secp256k1 ECDH and BIP340 Schnorr signing (`channels/nostr/nip44.py`, `nip01.py`). This is exactly the elliptic-curve arithmetic this project does not hand-roll — unlike the padding, HKDF, ChaCha20 and bech32 around it, which stayed stdlib and are checked against RFC/NIP test vectors in `tests/`. | The service's Nostr private key, held in memory only for the duration of a sign/ECDH call. Never the destination npub's private key — that is never in this process. |
+| `websocket-client` | Relay publish is a WebSocket connection; there is no stdlib client, same reasoning as `pyzmq`. | One outbound `wss://` connection per configured relay, opened per send and closed immediately after. Verifies the server certificate and hostname by default — `channels/nostr/channel.py` also refuses to construct with a non-`wss://` relay URL, so there is no plaintext fallback to reach in the first place. |
 
 Everything else is standard library on purpose, including the transaction parser — sixty lines
 rather than a parsing library, because the hot path of a service whose pitch is that it holds
 nothing worth stealing is a poor place for someone else's code. Development tooling (pytest,
 ruff) is not runtime and is not in that count.
 
-A dependency finding is therefore in scope if it is against `pyzmq` **and** you can describe the
-reachable path; otherwise it is almost certainly about the development tooling.
+A dependency finding is therefore in scope if it is against `pyzmq`, `coincurve` or
+`websocket-client` **and** you can describe the reachable path; otherwise it is almost certainly
+about the development tooling.
 
 ---
 

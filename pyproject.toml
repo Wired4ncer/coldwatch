@@ -10,9 +10,13 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
-    # The only runtime dependency, and the only one the design has room for: the ZMQ client
-    # for bitcoind's publisher. Everything else here is stdlib on purpose -- see SECURITY.md.
+    # The ZMQ client for bitcoind's publisher. See SECURITY.md's dependency table.
     "pyzmq>=25",
+    # secp256k1 ECDH + BIP340 Schnorr for the Nostr channel's NIP-44 encryption (issue #3) --
+    # the one piece of elliptic-curve arithmetic this project doesn't hand-roll.
+    "coincurve>=20",
+    # WebSocket client for publishing gift-wrapped events to Nostr relays.
+    "websocket-client>=1.7",
 ]
 
 [project.urls]
