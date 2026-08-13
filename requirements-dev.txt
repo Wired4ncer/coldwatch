@@ -1,9 +1,11 @@
 # Development and test dependencies — on top of the package itself.
-# Install the package too (`pip install -e .`): the tests import coldwatch, and pyzmq is now
-# declared there as a RUNTIME dependency rather than a tooling one.
+# Install the package too (`pip install -e .`): the tests import coldwatch, and pyzmq,
+# coincurve and websocket-client are declared there as RUNTIME dependencies, not tooling ones.
 
-pyzmq>=25.0    # also a runtime dependency now — see pyproject.toml and SECURITY.md.
-               # Used by the live subscriber, and by tools/replay_zmq.py.
+pyzmq>=25.0            # also a runtime dependency — see pyproject.toml and SECURITY.md.
+                       # Used by the live subscriber, and by tools/replay_zmq.py.
+coincurve>=20.0        # also a runtime dependency — Nostr channel signing/ECDH (issue #3).
+websocket-client>=1.7  # also a runtime dependency — Nostr channel relay publish (issue #3).
 
 # tools/fake_rpc.py and tools/make_fixtures.py are stdlib-only, by design —
 # a contributor can run the RPC fixture with nothing installed at all.
