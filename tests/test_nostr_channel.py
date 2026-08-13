@@ -286,66 +286,6 @@ def test_unreachable_relay_is_retriable():
     assert result.retriable is True
 
 
-# ── send: malformed relay frames ────────────────────────────────────────────────────────────
-
-
-def test_relay_closing_the_connection_is_retriable_not_a_crash():
-    """websocket-client's recv() returns "" for a CLOSE opcode; json.loads("") raises
-    JSONDecodeError, a ValueError not covered by send()'s except clause -- must not escape."""
-    relay = FakeRelay(recv_returns=lambda: "")
-    channel = make_channel(connect=make_connect({RELAY_A: relay}))
-    result = channel.send(RECIPIENT_PK, make_alert())
-    assert result.ok is False
-    assert result.retriable is True
-
-
-def test_relay_sending_non_json_is_retriable_not_a_crash():
-    relay = FakeRelay(recv_returns=lambda: "not json at all")
-    channel = make_channel(connect=make_connect({RELAY_A: relay}))
-    result = channel.send(RECIPIENT_PK, make_alert())
-    assert result.ok is False
-    assert result.retriable is True
-
-
-def test_ok_flag_as_the_string_false_is_not_delivered():
-    """Every non-empty JSON string is truthy in Python -- `bool("false")` is True. Must check
-    `frame[2] is True`, not truthiness, or a rejected event reads as delivered."""
-    relay = FakeRelay()
-    relay.recv_returns = lambda: json.dumps(["OK", relay.sent[-1]["id"], "false", "rejected"])
-    channel = make_channel(connect=make_connect({RELAY_A: relay}))
-    result = channel.send(RECIPIENT_PK, make_alert())
-    assert result.ok is False
-
-
-def test_non_string_ok_message_does_not_crash_classification():
-    relay = FakeRelay()
-    relay.recv_returns = lambda: json.dumps(["OK", relay.sent[-1]["id"], False, 12345])
-    channel = make_channel(connect=make_connect({RELAY_A: relay}))
-    result = channel.send(RECIPIENT_PK, make_alert())
-    assert result.ok is False
-    assert result.retriable is True
-
-
-def test_closed_frame_is_recognised_even_though_it_carries_a_subscription_id():
-    """NIP-01's CLOSED carries a *subscription* id in frame[1], never an event id -- this
-    channel never sends a REQ, so any CLOSED here is relay-level and must not be compared
-    against event["id"] (which can never match)."""
-    relay = FakeRelay(recv_returns=lambda: json.dumps(["CLOSED", "sub-1", "shutting down"]))
-    channel = make_channel(connect=make_connect({RELAY_A: relay}))
-    result = channel.send(RECIPIENT_PK, make_alert())
-    assert result.ok is False
-
-
-def test_receive_loop_has_an_overall_deadline_not_a_per_recv_one():
-    """A relay that keeps sending NOTICEs (never the OK) resets a per-recv timeout on every
-    iteration -- an overall deadline is required to ever exit the loop."""
-    relay = FakeRelay(recv_returns=lambda: json.dumps(["NOTICE", "still here"]))
-    channel = make_channel(connect=make_connect({RELAY_A: relay}), timeout=0.05)
-    result = channel.send(RECIPIENT_PK, make_alert())
-    assert result.ok is False
-    assert result.retriable is True
-
-
 # ── send: multi-relay fallback ───────────────────────────────────────────────────────────────
 
 
@@ -432,24 +372,8 @@ def test_delivery_result_detail_never_contains_the_destination_or_content(note):
 # These use `ScriptedRelay` rather than `FakeRelay` for the reason given in fake_relay.py: a
 # double that can only emit `["OK", <id>, <bool>, <str>]` can only test the case that already
 # works.
-#
-# Most of them are `xfail` against the channel as merged. They are written as the behaviour the
-# contract requires, not as the behaviour the code has, so each one becomes the test for its own
-# fix rather than something to rewrite afterwards.
 
 
-def xfail(reason: str):
-    """Mark a case that the channel does not satisfy yet.
-
-    `strict=True` on purpose: once the defect is fixed the test starts passing, pytest reports
-    the XPASS as a failure, and the marker has to be deleted. A non-strict xfail would let these
-    quietly outlive the bugs they describe, which is the failure mode that makes a suite lie.
-    """
-    return pytest.mark.xfail(strict=True, reason=reason)
-
-
-@xfail("json.loads on the empty string websocket-client returns for a CLOSE opcode raises "
-       "JSONDecodeError, and send() catches only OSError/WebSocketException")
 def test_relay_that_closes_the_connection_is_a_retriable_failure():
     """websocket-client's `recv` returns `""` for a CLOSE opcode rather than raising (see
     `WebSocket.recv`), so a relay that accepts the frame and then hangs up -- routine on idle
@@ -463,7 +387,6 @@ def test_relay_that_closes_the_connection_is_a_retriable_failure():
     assert result.retriable is True
 
 
-@xfail("the JSONDecodeError escapes send() before the loop reaches relay B")
 def test_relay_that_closes_does_not_strand_the_remaining_relays():
     """The cost of an exception here is not just the lost verdict: `send`'s loop never reaches
     relay B, so one relay hanging up loses the alarm on every relay configured after it."""
@@ -480,20 +403,16 @@ def test_relay_that_closes_does_not_strand_the_remaining_relays():
     assert len(relay_b.sent) == 1, "relay B was never tried"
 
 
-_NOT_JSON = xfail("json.loads raises JSONDecodeError, which is a ValueError and so passes "
-                  "straight through send()'s except clause")
-
-
 @pytest.mark.parametrize(
     "frame",
     [
         # Not JSON at all -- these die in `json.loads`.
-        pytest.param("not json at all", marks=_NOT_JSON),
-        pytest.param("{", marks=_NOT_JSON),
-        pytest.param("[", marks=_NOT_JSON),
+        "not json at all",
+        "{",
+        "[",
         # Valid JSON of the wrong shape -- these are already handled, by the `isinstance(frame,
-        # list) or not frame` guard. Kept unmarked so the split stays visible: the guard exists,
-        # it is simply upstream of the parse that fails first.
+        # list) or not frame` guard. Kept in the same list so the split stays visible: the guard
+        # exists, it is simply upstream of the parse that fails first.
         '{"not": "an array"}',
         "[]",
         "null",
@@ -512,7 +431,6 @@ def test_a_frame_that_is_not_a_nip01_message_does_not_escape_as_an_exception(fra
     assert result.retriable is True
 
 
-@xfail("bool(frame[2]) coerces instead of checking: bool(\"false\") is True")
 def test_ok_flag_that_is_a_string_is_not_read_as_acceptance():
     """`bool("false")` is `True`. A relay that sends its flag as a JSON string rather than a
     bool must not turn a rejection into a delivered alarm -- of the two directions this can
@@ -530,7 +448,6 @@ def test_ok_flag_that_is_a_string_is_not_read_as_acceptance():
     assert result.ok is False, "a non-boolean OK flag was read as acceptance"
 
 
-@xfail("_classify_note calls .split on frame[3] without checking it is a string")
 def test_ok_message_that_is_not_a_string_is_a_result_not_a_crash():
     """`_classify_note` calls `.split` on whatever `frame[3]` holds. Nothing upstream checks
     that it is a string."""
@@ -543,8 +460,6 @@ def test_ok_message_that_is_not_a_string_is_a_result_not_a_crash():
     assert isinstance(result.detail, str)
 
 
-@xfail("the CLOSED branch compares frame[1] to the event id, but CLOSED carries a "
-       "subscription id, so it never matches")
 def test_closed_frame_ends_the_publish_promptly():
     """NIP-01's `CLOSED` carries a *subscription* id, so matching it against the event id can
     never fire and the loop keeps reading. This channel never sends a REQ, so a `CLOSED` can
@@ -558,7 +473,6 @@ def test_closed_frame_ends_the_publish_promptly():
     assert relay.recv_calls == 1, "kept reading past the CLOSED instead of acting on it"
 
 
-@xfail("self._timeout bounds one recv(), not the loop around it")
 def test_a_relay_that_never_oks_gives_up_instead_of_reading_forever():
     """`timeout` is passed to the socket, so it bounds one `recv`, not the loop around it. A
     relay that keeps talking without ever acknowledging our event resets that clock on every
