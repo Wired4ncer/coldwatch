@@ -65,8 +65,10 @@ class FakeRelay:
 
 
 #: A frame is either raw text sent verbatim, or a callable handed the id of the event just
-#: published -- the only part of a reply a test cannot know in advance.
-Frame = str | Callable[[str], str]
+#: published -- the only part of a reply a test cannot know in advance. `bytes` is in the union
+#: because websocket-client's `recv` returns raw bytes for a BINARY opcode rather than a `str`,
+#: and "the relay replied, but not with text" is its own way for a reply to be malformed.
+Frame = str | bytes | Callable[[str], str | bytes]
 
 
 class ScriptedRelay:
@@ -105,7 +107,7 @@ class ScriptedRelay:
         assert frame[0] == "EVENT"
         self.sent.append(frame[1])
 
-    def recv(self) -> str:
+    def recv(self) -> str | bytes:
         if self.delay:
             time.sleep(self.delay)
         self.recv_calls += 1

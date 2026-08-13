@@ -640,6 +640,31 @@ MUTATIONS: list[Mutation] = [
         old="        if alert.direction is Direction.INCOMING:",
         new="        if alert.direction is not Direction.OUTGOING:",
     ),
+    # ── channels/nostr/channel.py: the relay boundary, where the reply is hostile input ──────
+    #
+    # Both of these are review findings from #35, and both have the same shape: an exception
+    # escaping `send`. That is worse than any verdict `send` could return, because the caller
+    # expected a `DeliveryResult` and gets an unhandled alarm instead -- and the loop never
+    # reaches the relays listed after the one that threw.
+    Mutation(
+        module="channels/nostr/channel.py",
+        describes="a relay reply that is bytes rather than text escapes send() as an exception",
+        old="""\
+                    frame = json.loads(conn.recv())
+                except ValueError:""",
+        new="""\
+                    frame = json.loads(conn.recv())
+                except json.JSONDecodeError:""",
+    ),
+    Mutation(
+        module="channels/nostr/channel.py",
+        describes="a relay URL that isn't a URL is accepted at construction and throws at 3am",
+        old="""\
+                raise ValueError(f"relay must be wss://: {relay!r}")
+            _check_relay_url(relay)""",
+        new="""\
+                raise ValueError(f"relay must be wss://: {relay!r}")""",
+    ),
 ]
 
 

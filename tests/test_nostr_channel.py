@@ -495,6 +495,60 @@ def test_a_relay_that_never_oks_gives_up_instead_of_reading_forever():
     )
 
 
+@pytest.mark.parametrize(
+    "frame",
+    [
+        # A BINARY opcode: websocket-client's `recv` hands back raw bytes rather than a str,
+        # and `json.loads` on bytes that aren't valid UTF-8 raises `UnicodeDecodeError` --
+        # a ValueError, but not the `json.JSONDecodeError` subclass.
+        b'["OK","0000",true,"\xff\xfe"]',
+        # Valid UTF-8 bytes are fine to parse -- included so this test can't pass merely
+        # because every bytes frame is rejected somewhere upstream.
+        b'["NOTICE","bytes, but decodable"]',
+    ],
+)
+def test_a_frame_that_is_not_text_does_not_escape_as_an_exception(frame):
+    """`recv` returns `str | bytes`, and only one of those is guaranteed to decode. The cost of
+    getting this wrong is the same as any other escaping exception: the caller expected a
+    `DeliveryResult` and got an unhandled alarm instead."""
+    relay = ScriptedRelay([frame])
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+
+    result = channel.send(RECIPIENT_PK, make_alert())
+
+    assert result.ok is False
+    assert result.retriable is True
+
+
+def test_a_text_frame_that_is_not_valid_utf8_does_not_escape_as_an_exception():
+    """The same failure one layer earlier: for a TEXT opcode websocket-client decodes inside
+    `recv` itself (`data.decode("utf-8")`), so the `UnicodeDecodeError` is raised by the call,
+    not by `json.loads` -- which only stays caught while the call sits inside the same `try`."""
+    relay = ScriptedRelay(
+        [], exhausted=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    )
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+
+    result = channel.send(RECIPIENT_PK, make_alert())
+
+    assert result.ok is False
+    assert result.retriable is True
+
+
+def test_a_binary_frame_does_not_strand_the_remaining_relays():
+    relay_a = ScriptedRelay([b'["OK","0000",true,"\xff\xfe"]'])
+    relay_b = FakeRelay(ok=True)
+    channel = make_channel(
+        relays=(RELAY_A, RELAY_B),
+        connect=make_connect({RELAY_A: relay_a, RELAY_B: relay_b}),
+    )
+
+    result = channel.send(RECIPIENT_PK, make_alert())
+
+    assert result.ok is True
+    assert len(relay_b.sent) == 1, "relay B was never tried"
+
+
 def test_a_malformed_frame_never_reaches_delivery_result_detail():
     """The existing leak test covers a well-formed reply. The same discipline has to survive a
     reply whose shape is wrong, since that is the path where a note is least likely to have
@@ -514,6 +568,29 @@ def test_a_malformed_frame_never_reaches_delivery_result_detail():
 def test_rejects_non_wss_relays():
     with pytest.raises(ValueError):
         make_channel(relays=("ws://insecure.example.invalid",))
+
+
+@pytest.mark.parametrize(
+    "relay",
+    [
+        "wss://relay.example.invalid:99999/",  # ValueError: Port out of range 0-65535
+        "wss://[bad",  # ValueError: Invalid IPv6 URL
+        "wss://",  # ValueError: hostname is invalid -- e.g. a truncated env var
+    ],
+)
+def test_rejects_a_relay_url_that_is_not_a_url(relay):
+    """`create_connection` raises a plain `ValueError` for these -- not a `WebSocketException`,
+    so `send`'s transport handler doesn't catch it and it escapes onto the alarm path, taking
+    every relay after it untried. A typo in COLDWATCH_NOSTR_RELAYS has to fail here, at
+    construction, the same way `ws://` does."""
+    with pytest.raises(ValueError):
+        make_channel(relays=(relay,))
+
+
+def test_accepts_a_relay_url_with_a_port_and_a_path():
+    """The check above must reject junk without rejecting the legitimate shapes -- a relay on a
+    non-default port, or served under a path, is ordinary."""
+    make_channel(relays=("wss://relay.example.invalid:7777/nostr",))
 
 
 def test_requires_at_least_one_relay():

@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import ClassVar, Protocol
+from urllib.parse import urlsplit
 
 import websocket
 from coincurve import PublicKey
@@ -135,7 +136,7 @@ class RelayConnection(Protocol):
     for the real one and `tests/fake_relay.py` for the test double."""
 
     def send(self, text: str) -> None: ...
-    def recv(self) -> str: ...
+    def recv(self) -> str | bytes: ...  # bytes for a BINARY opcode -- see `_publish_to`
     def close(self) -> None: ...
 
 
@@ -145,6 +146,28 @@ ConnectFn = Callable[[str, float], RelayConnection]
 def _classify_note(note: str) -> str:
     prefix = note.split(":", 1)[0].strip().lower() if isinstance(note, str) and note else ""
     return prefix if prefix in _KNOWN_NOTE_PREFIXES else "rejected"
+
+
+def _check_relay_url(relay: str) -> None:
+    """Reject a URL `create_connection` would refuse, at construction rather than at 3am.
+
+    The `wss://` prefix check above is about *policy*; this is about the rest of the URL being
+    a URL at all. `websocket.create_connection` raises a plain `ValueError` -- not the
+    `WebSocketException` `send` treats as a retriable transport failure -- for a port out of
+    range, an unterminated IPv6 literal, or a missing host, so a typo in
+    `COLDWATCH_NOSTR_RELAYS` would otherwise construct cleanly, sit there looking configured,
+    and then throw out of `send` on the alarm path, taking every relay listed after it with it.
+
+    `urlsplit` raises on exactly the same shapes websocket-client's own parser does, and is
+    stdlib -- no reaching into that package's private `_url` module to get it.
+    """
+    try:
+        parts = urlsplit(relay)
+        parts.port  # noqa: B018 -- a property, and the one that raises on a bad port
+    except ValueError as exc:
+        raise ValueError(f"relay is not a valid URL: {relay!r} ({exc})") from None
+    if not parts.hostname:
+        raise ValueError(f"relay has no host: {relay!r}")
 
 
 class NostrChannel:
@@ -169,6 +192,7 @@ class NostrChannel:
                 # connect: a plaintext ws:// relay is rejected at construction, not discovered
                 # mid-publish.
                 raise ValueError(f"relay must be wss://: {relay!r}")
+            _check_relay_url(relay)
         try:
             key_length = len(bytes.fromhex(privkey))
         except ValueError:
@@ -247,10 +271,18 @@ class NostrChannel:
                     raise websocket.WebSocketTimeoutException("timed out waiting for OK")
                 try:
                     frame = json.loads(conn.recv())
-                except json.JSONDecodeError:
-                    # E.g. recv() returning "" for a CLOSE opcode -- a relay accepting the
-                    # EVENT and then hanging up without an OK is routine. Treat as a malformed,
-                    # retriable reply rather than letting the exception escape send().
+                except ValueError:
+                    # `ValueError`, not `json.JSONDecodeError`: that subclass covers a frame
+                    # that isn't JSON, but not a frame that isn't *text*. websocket-client
+                    # returns raw bytes for a BINARY opcode, and `json.loads` on bytes that
+                    # aren't valid UTF-8 raises `UnicodeDecodeError` -- also a ValueError, and
+                    # nothing in `send` catches it, so it escaped the channel entirely. A TEXT
+                    # frame carrying invalid UTF-8 raises the same thing one layer earlier,
+                    # inside `recv` itself, which is why the call is inside this `try` too.
+                    #
+                    # Also the ordinary path for recv() returning "" for a CLOSE opcode -- a
+                    # relay accepting the EVENT and then hanging up without an OK is routine.
+                    # Either way: a malformed, retriable reply, not an exception out of send().
                     return False, "malformed"
                 if not isinstance(frame, list) or not frame:
                     continue
