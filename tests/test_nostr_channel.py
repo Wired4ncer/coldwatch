@@ -113,6 +113,15 @@ def test_validate_dest_rejects_junk(raw):
         channel.validate_dest(raw)
 
 
+def test_validate_dest_rejects_a_well_formed_npub_that_is_not_a_curve_point():
+    """Bech32-valid, 32 bytes, but roughly half of all 32-byte values aren't a valid
+    secp256k1 x-coordinate -- this must fail at enrolment, not later inside send()."""
+    off_curve_npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzsfj2hcx"
+    channel = make_channel(connect=make_connect({RELAY_A: FakeRelay()}))
+    with pytest.raises(ValueError):
+        channel.validate_dest(off_curve_npub)
+
+
 # ── send: success ────────────────────────────────────────────────────────────────────────────
 
 
@@ -272,6 +281,66 @@ def test_unreachable_relay_is_retriable():
     channel = make_channel(
         connect=make_connect({RELAY_A: RaisingConnect(ConnectionRefusedError("no route"))})
     )
+    result = channel.send(RECIPIENT_PK, make_alert())
+    assert result.ok is False
+    assert result.retriable is True
+
+
+# ── send: malformed relay frames ────────────────────────────────────────────────────────────
+
+
+def test_relay_closing_the_connection_is_retriable_not_a_crash():
+    """websocket-client's recv() returns "" for a CLOSE opcode; json.loads("") raises
+    JSONDecodeError, a ValueError not covered by send()'s except clause -- must not escape."""
+    relay = FakeRelay(recv_returns=lambda: "")
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+    result = channel.send(RECIPIENT_PK, make_alert())
+    assert result.ok is False
+    assert result.retriable is True
+
+
+def test_relay_sending_non_json_is_retriable_not_a_crash():
+    relay = FakeRelay(recv_returns=lambda: "not json at all")
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+    result = channel.send(RECIPIENT_PK, make_alert())
+    assert result.ok is False
+    assert result.retriable is True
+
+
+def test_ok_flag_as_the_string_false_is_not_delivered():
+    """Every non-empty JSON string is truthy in Python -- `bool("false")` is True. Must check
+    `frame[2] is True`, not truthiness, or a rejected event reads as delivered."""
+    relay = FakeRelay()
+    relay.recv_returns = lambda: json.dumps(["OK", relay.sent[-1]["id"], "false", "rejected"])
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+    result = channel.send(RECIPIENT_PK, make_alert())
+    assert result.ok is False
+
+
+def test_non_string_ok_message_does_not_crash_classification():
+    relay = FakeRelay()
+    relay.recv_returns = lambda: json.dumps(["OK", relay.sent[-1]["id"], False, 12345])
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+    result = channel.send(RECIPIENT_PK, make_alert())
+    assert result.ok is False
+    assert result.retriable is True
+
+
+def test_closed_frame_is_recognised_even_though_it_carries_a_subscription_id():
+    """NIP-01's CLOSED carries a *subscription* id in frame[1], never an event id -- this
+    channel never sends a REQ, so any CLOSED here is relay-level and must not be compared
+    against event["id"] (which can never match)."""
+    relay = FakeRelay(recv_returns=lambda: json.dumps(["CLOSED", "sub-1", "shutting down"]))
+    channel = make_channel(connect=make_connect({RELAY_A: relay}))
+    result = channel.send(RECIPIENT_PK, make_alert())
+    assert result.ok is False
+
+
+def test_receive_loop_has_an_overall_deadline_not_a_per_recv_one():
+    """A relay that keeps sending NOTICEs (never the OK) resets a per-recv timeout on every
+    iteration -- an overall deadline is required to ever exit the loop."""
+    relay = FakeRelay(recv_returns=lambda: json.dumps(["NOTICE", "still here"]))
+    channel = make_channel(connect=make_connect({RELAY_A: relay}), timeout=0.05)
     result = channel.send(RECIPIENT_PK, make_alert())
     assert result.ok is False
     assert result.retriable is True
@@ -536,6 +605,19 @@ def test_rejects_non_wss_relays():
 def test_requires_at_least_one_relay():
     with pytest.raises(MissingConfig):
         make_channel(relays=())
+
+
+def test_rejects_a_truncated_private_key():
+    """coincurve left-pads a short secret rather than rejecting it -- a credential file
+    clipped by a partial write or bad paste must not silently boot under a different
+    identity, so a wrong-length key has to fail at construction."""
+    with pytest.raises(MissingConfig):
+        make_channel(privkey=SERVICE_SK[:16], relays=(RELAY_A,))
+
+
+def test_rejects_a_non_hex_private_key():
+    with pytest.raises(MissingConfig):
+        make_channel(privkey="not hex at all, not even close to a key", relays=(RELAY_A,))
 
 
 def test_repr_never_contains_the_private_key():

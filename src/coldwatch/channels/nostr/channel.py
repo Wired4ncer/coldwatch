@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import ClassVar, Protocol
 
 import websocket
+from coincurve import PublicKey
 
 from coldwatch.channels.base import Alert, AlertKind, DeliveryResult, Direction, PrivacyClass
 from coldwatch.channels.nostr import bech32, giftwrap, nip01
@@ -141,7 +143,7 @@ ConnectFn = Callable[[str, float], RelayConnection]
 
 
 def _classify_note(note: str) -> str:
-    prefix = note.split(":", 1)[0].strip().lower() if note else ""
+    prefix = note.split(":", 1)[0].strip().lower() if isinstance(note, str) and note else ""
     return prefix if prefix in _KNOWN_NOTE_PREFIXES else "rejected"
 
 
@@ -167,6 +169,15 @@ class NostrChannel:
                 # connect: a plaintext ws:// relay is rejected at construction, not discovered
                 # mid-publish.
                 raise ValueError(f"relay must be wss://: {relay!r}")
+        try:
+            key_length = len(bytes.fromhex(privkey))
+        except ValueError:
+            raise MissingConfig("private key is not valid hex") from None
+        if key_length != 32:
+            # coincurve left-pads a short secret rather than rejecting it, which would
+            # silently boot the service under a different identity -- see the module
+            # docstring's "single published npub" trust anchor.
+            raise MissingConfig(f"private key must be 32 bytes, got {key_length}")
         self._privkey = privkey
         self._pubkey = nip01.pubkey_hex_from_privkey(privkey)
         self._relays = tuple(relays)
@@ -210,6 +221,13 @@ class NostrChannel:
             pubkey = bech32.decode_npub(candidate)
         except ValueError:
             raise ValueError("not a valid npub") from None
+        try:
+            # x-only pubkeys don't record which y was intended -- 0x02 (even) is the BIP340
+            # convention nip44.get_conversation_key also assumes. This only proves the
+            # x-coordinate is on the curve at all; roughly half of all 32-byte values aren't.
+            PublicKey(b"\x02" + pubkey)
+        except ValueError:
+            raise ValueError("not a valid npub") from None
         # Hex, not npub, is what's stored and what send() needs -- npub is a display format
         # only (NIP-19 explicitly says it MUST NOT appear in NIP-01 events), so normalising to
         # hex here means send() never has to re-derive it.
@@ -217,15 +235,35 @@ class NostrChannel:
 
     def _publish_to(self, relay: str, event: dict) -> tuple[bool, str]:
         conn = self._connect(relay, self._timeout)
+        # self._timeout, passed to connect() above, only bounds a single recv() -- a relay that
+        # keeps sending frames that are never the OK we're waiting for (NOTICE spam, someone
+        # else's subscription traffic) would otherwise reset the clock on every iteration and
+        # never time out. This deadline bounds the loop as a whole.
+        deadline = time.monotonic() + self._timeout
         try:
             conn.send(json.dumps(["EVENT", event], ensure_ascii=False, separators=(",", ":")))
             while True:
-                frame = json.loads(conn.recv())
+                if time.monotonic() >= deadline:
+                    raise websocket.WebSocketTimeoutException("timed out waiting for OK")
+                try:
+                    frame = json.loads(conn.recv())
+                except json.JSONDecodeError:
+                    # E.g. recv() returning "" for a CLOSE opcode -- a relay accepting the
+                    # EVENT and then hanging up without an OK is routine. Treat as a malformed,
+                    # retriable reply rather than letting the exception escape send().
+                    return False, "malformed"
                 if not isinstance(frame, list) or not frame:
                     continue
                 if frame[0] == "OK" and len(frame) >= 3 and frame[1] == event["id"]:
-                    return bool(frame[2]), (frame[3] if len(frame) > 3 else "")
-                if frame[0] == "CLOSED" and len(frame) >= 2 and frame[1] == event["id"]:
+                    note = frame[3] if len(frame) > 3 else ""
+                    # `is True`, not `bool(...)`: NIP-01's flag is a JSON bool, but a relay is
+                    # untrusted input -- the *string* "false" is truthy and must not read as
+                    # delivered.
+                    return frame[2] is True, note
+                if frame[0] == "CLOSED" and len(frame) >= 2:
+                    # NIP-01's CLOSED carries a *subscription* id in frame[1], never an event
+                    # id -- this channel never sends a REQ, so any CLOSED here can only be
+                    # relay-level (e.g. shutting down), not a match to compare against event["id"].
                     return False, (frame[2] if len(frame) > 2 else "")
                 # NOTICE, or an OK/EVENT for someone else's subscription -- keep waiting.
         finally:

@@ -297,7 +297,7 @@ implementation can be built and tested with no node and no database.
 | kind | class | notes |
 |---|---|---|
 | `email` | `PROVIDER_READS` | **First rail — reach.** Requires `privacy_ack`. Subject is a **constant** (subjects are logged and indexed everywhere); body is a minimal template. Enforce TLS, no opportunistic downgrade. ⚠️ See the hardening note below. |
-| `nostr` | `E2E_PRIVATE` | NIP-17 gift-wrap to the user's npub — content *and* sender/recipient metadata sealed. The privacy-recommended default. |
+| `nostr` | `E2E_PRIVATE` | NIP-17 gift-wrap to the user's npub — content *and* sender/recipient metadata sealed. The privacy-recommended default. ⚠️ See the relay-selection note below. |
 | `webhook` | `ENDPOINT_TRUSTED` | POST JSON, HMAC-signed with a per-channel secret shown once so the user can authenticate us. Egress over Tor. |
 | `ntfy` | either | Self-hosted URL is endpoint-trusted; the public instance is provider-reads — flag it. A random topic is not authentication. |
 
@@ -311,6 +311,15 @@ Postfix keeps its own plaintext copies — `mail.log` and the deferred queue bot
 destination, bypassing `dest_ct` entirely. An email-capable release without log scrubbing and
 queue purging **breaks the register-and-forget claim outside the database**, where the encryption
 cannot help. That hardening ships with the email channel, not after it.
+
+### Nostr publishes to our relay list, not the recipient's
+
+`NostrChannel.send` stops at the first relay in `COLDWATCH_NOSTR_RELAYS` — one list, shared by
+every destination — that acknowledges the event. NIP-17 properly resolves this by publishing the
+gift wrap to every relay in the recipient's own `kind:10050` DM-relay list; that lookup is not
+built. Until it is, an alarm can be accepted (`DeliveryResult(ok=True)`) by a relay the recipient's
+client never reads from — a delivered receipt that isn't a delivery guarantee. See
+[SECURITY.md](../SECURITY.md)'s accepted residuals.
 
 ### Delivery pipeline
 

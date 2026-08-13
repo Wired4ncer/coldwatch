@@ -69,6 +69,12 @@ publicly in [docs/architecture.md](docs/architecture.md) rather than buried:
   a mail provider can read a message it delivers is not a finding.
 - **A lost capability token means lost service.** There is no recovery path, because a recovery
   path is an account, and an account is the thing this product does not have.
+- **An alert reaches one relay from a single service-wide list, not the recipient's own
+  relays.** `NostrChannel.send` stops at the first relay in `COLDWATCH_NOSTR_RELAYS` that ACKs
+  the event; that list is not per-destination, and this channel does not fetch a recipient's
+  `kind:10050` DM-relay list per NIP-17. If the recipient's client only reads from relays outside
+  that list, a `DeliveryResult(ok=True)` alarm can still go unseen. Per-recipient relay discovery
+  is not implemented yet.
 
 If you think one of these is *worse than documented* — that a stated residual leaks more than
 the document claims — that is a real report and worth sending.

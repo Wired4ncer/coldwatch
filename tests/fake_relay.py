@@ -42,10 +42,15 @@ class FakeRelay:
         ok: bool = True,
         note: str = "",
         recv_error: Exception | None = None,
+        recv_returns=None,
     ) -> None:
         self.ok = ok
         self.note = note
         self.recv_error = recv_error
+        #: Optional `() -> str` overriding the default well-formed OK reply -- for frames a
+        #: real relay can send that don't fit the ok/note shape: "" (a CLOSE opcode), a
+        #: non-JSON string, a wrong-typed OK flag, a CLOSED, or an unbounded stream of NOTICEs.
+        self.recv_returns = recv_returns
         self.sent: list[dict] = []
         self.closed = False
 
@@ -57,6 +62,8 @@ class FakeRelay:
     def recv(self) -> str:
         if self.recv_error is not None:
             raise self.recv_error
+        if self.recv_returns is not None:
+            return self.recv_returns()
         event_id = self.sent[-1]["id"]
         return json.dumps(["OK", event_id, self.ok, self.note])
 
