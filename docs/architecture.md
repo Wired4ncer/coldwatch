@@ -100,7 +100,7 @@ CREATE TABLE watch_item (
                                           -- so without it there is nothing to scan for (§4).
   label_ct      BLOB NOT NULL,
   incoming_mode TEXT NOT NULL DEFAULT 'info',     -- info|mute (outgoing is always alarm)
-  status        TEXT NOT NULL DEFAULT 'arming',   -- arming|active|paused|stopped
+  status        TEXT NOT NULL DEFAULT 'arming',   -- arming|armed|active|paused|stopped
   drip_rate     INTEGER NOT NULL DEFAULT 10,      -- sats/day
   created_at    INTEGER NOT NULL
 );
@@ -147,6 +147,32 @@ CREATE TABLE outbox (
 
 Run with `secure_delete=ON`; `VACUUM` after bulk deletion. SQLite leaves freed pages readable
 otherwise, which quietly undoes a purge.
+
+**Built** — `storage/store.py`. Three things it settles that the sketch above left open:
+
+- **`armed` sits between `arming` and `active`.** The baseline scan finishing and the user
+  confirming the test-fire are two events minutes to days apart, and the record has to be kept
+  current in between: a coin spent after the baseline but before confirmation is a spend the
+  block path must fold in, or the row goes stale and the first reconciliation pass raises a
+  false alarm. So `armed` and `paused` items are *tracked* (blocks write their outpoints) but
+  not *alertable*; `active` is both; `arming` and `stopped` are neither. The store's
+  `WatchIndex` answers only "is the record live" — whether a match becomes an alert is the
+  delivery layer's decision, keyed on the same status.
+- **Every `*_ct` column is ChaCha20-Poly1305 (RFC 8439)**, hand-rolled in `crypto/` against
+  the RFC's vectors under the dependency policy from [#3](https://github.com/Wired4ncer/coldwatch/issues/3),
+  as `nonce(12) ‖ ciphertext ‖ tag(16)` with a fresh random nonce per seal. The associated data
+  is the column's purpose **and the tenant's id**, so a `dest_ct` cannot be read as an `spk_ct`
+  and a ciphertext cannot be moved between watches.
+- **`activate` is refused by the store, not by the caller,** unless the item is `armed` and at
+  least one *routed* channel has `verified_at` set. `arm` is refused on anything but `arming`:
+  once armed, blocks own the record and a second baseline would be older than it.
+
+The baseline `arm` writes is a snapshot at the height the scan finished on, and the tip has
+usually moved during the ~186 s it took. Closing that window — replaying the blocks between
+the scan's `bestblock` and the tip through `Matcher.apply` before calling `arm` — is the
+enrolment service's job ([#23](https://github.com/Wired4ncer/coldwatch/issues/23)). The height
+is deliberately not stored: it would be a block-precision timestamp at rest, and the service
+only needs it for the minute it takes.
 
 ---
 
@@ -372,7 +398,8 @@ A token-authenticated nuke endpoint deletes everything for a tenant immediately.
    hardening and the mail log/queue purge still open
    ([#22](https://github.com/Wired4ncer/coldwatch/issues/22))
 4. **Enrolment API** + capability tokens + the arming state machine.
-   — open ([#23](https://github.com/Wired4ncer/coldwatch/issues/23))
+   — storage layer built (§3); the API and the arming service still open
+   ([#23](https://github.com/Wired4ncer/coldwatch/issues/23))
 5. **Payment** — Lightning, prepaid balance, drip debit.
 6. **Watchdog** on separate infrastructure, plus the public uptime page.
 
@@ -387,7 +414,8 @@ A token-authenticated nuke endpoint deletes everything for a tenant immediately.
 | Two live SUB sockets | built |
 | Scan supervisor — queue, batching, abort-on-death | built (mechanism only) |
 | **UTXO-set diff and reorg repair** | **blocked on enrolment writing `spk_ct`** ([#21](https://github.com/Wired4ncer/coldwatch/issues/21)) |
-| `ARMING` state, test-fire ordering | with the enrolment API |
+| Storage — schema, AEAD at rest, token lookup, item state machine, `WatchIndex` on SQLite | built |
+| `ARMING` state, test-fire ordering, the enrolment API itself | open ([#23](https://github.com/Wired4ncer/coldwatch/issues/23)) |
 
 Chain catch-up is **proven against the production node**, not only against fixtures
 ([#24](https://github.com/Wired4ncer/coldwatch/issues/24)): a six-block gap was induced, the
