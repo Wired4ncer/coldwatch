@@ -17,6 +17,7 @@ from coldwatch.match import Match, Matcher, parse_tx, spk_hmac
 from coldwatch.match.keys import derive_subkeys, outpoint_hmac
 from coldwatch.storage import (
     TOKEN_BYTES,
+    BadTransition,
     ItemStatus,
     NotActivatable,
     NotArmable,
@@ -243,7 +244,7 @@ def test_pause_keeps_the_record_live_and_resume_restores(store, keys):
 
 def test_pause_from_the_wrong_state_is_refused(store):
     _, _, item_id, _ = enrolled(store)
-    with pytest.raises(NotActivatable):
+    with pytest.raises(BadTransition):
         store.pause(item_id)
 
 
@@ -368,7 +369,51 @@ def test_schema_is_versioned(store):
     assert store._db.execute("PRAGMA user_version").fetchone()[0] == 1
 
 
-def test_the_connection_is_shareable_across_threads(store):
+def test_a_coin_seen_for_a_purged_item_is_dropped_not_raised(store, keys):
+    """The loop looks the item up, releases the lock, then writes. If the tenant purged
+    itself in between, the write must be a no-op -- a foreign-key error here comes out of
+    the block path and stops every tenant's watcher."""
+    _, watch_id, item_id, _ = enrolled(store)
+    store.arm(item_id, [])
+    store.purge_watch(watch_id)
+    store.add_outpoint(item_id, outpoint_hmac(keys.match, PREV, 0))  # must not raise
+    store.drop_outpoint(item_id, outpoint_hmac(keys.match, PREV, 0))
+
+
+def test_a_coin_seen_for_a_stopped_item_is_not_recorded(store, keys):
+    """Same window, other outcome: a coin recorded against a stopped item would later match
+    as a spend nobody asked to be told about."""
+    _, _, item_id, _ = enrolled(store)
+    store.arm(item_id, [])
+    store.stop_item(item_id)
+    coin = outpoint_hmac(keys.match, PREV, 0)
+    store.add_outpoint(item_id, coin)
+    assert store.items_owning_outpoint(coin) == ()
+
+
+def test_a_coin_seen_for_an_arming_item_is_not_recorded(store, keys):
+    """The baseline owns the record until `arm`; a stray write before it would be doubled
+    or, worse, be a coin the baseline then reports as still unspent."""
+    _, _, item_id, _ = enrolled(store)
+    coin = outpoint_hmac(keys.match, PREV, 0)
+    store.add_outpoint(item_id, coin)
+    assert store.outpoint_count(item_id) == 0
+
+
+def test_a_newer_schema_is_refused(db_path, keys):
+    with Store(db_path, keys):
+        pass
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA user_version=99")
+    conn.commit()
+    conn.close()
+    with pytest.raises(RuntimeError):
+        Store(db_path, keys)
+
+
+def test_reads_from_several_threads_raise_no_thread_affinity_error(store):
+    """Only that: sqlite3's default `check_same_thread` would raise here. It does not
+    exercise the lock, which guards write interleaving and has no deterministic test."""
     import threading
 
     _, _, item_id, _ = enrolled(store)

@@ -10,6 +10,7 @@ public chain data. See CONTRIBUTING.md invariant I3 and docs/architecture.md §3
 
 from coldwatch.storage.store import (
     TOKEN_BYTES,
+    BadTransition,
     ChannelRow,
     Item,
     ItemStatus,
@@ -23,6 +24,7 @@ from coldwatch.storage.store import (
 
 __all__ = [
     "TOKEN_BYTES",
+    "BadTransition",
     "ChannelRow",
     "Item",
     "ItemStatus",

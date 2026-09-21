@@ -1,12 +1,13 @@
-"""ChaCha20 (RFC 8439), unauthenticated stream cipher only — no Poly1305 here.
+"""ChaCha20 (RFC 8439), unauthenticated stream cipher only — the authenticator is elsewhere.
 
-Stdlib-only, deliberately: unlike Schnorr signing and ECDH (`nip01.py`, `nip44.py`'s
-conversation-key step), ChaCha20 has no elliptic-curve arithmetic and no secret-dependent
-branching or table lookups to get subtly wrong — it's addition, XOR and fixed bit-rotation on a
-public counter and public nonce. NIP-44 supplies its own authentication (HMAC-SHA256 over the
-ciphertext, computed in `nip44.py`), so this module never needs to be constant-time against
-anything but a mistake in arithmetic, which `tests/test_chacha20.py` checks against the RFC's
-own published test vectors rather than trusting this transcription.
+Stdlib-only, deliberately: unlike Schnorr signing and ECDH (`channels/nostr/nip01.py`,
+`nip44.py`'s conversation-key step), ChaCha20 has no elliptic-curve arithmetic and no
+secret-dependent branching or table lookups to get subtly wrong — it's addition, XOR and fixed
+bit-rotation on a public counter and public nonce. Its two users each bring their own
+authentication: NIP-44 an HMAC-SHA256 over the ciphertext (`nip44.py`), the storage AEAD a
+Poly1305 tag (`aead.py`; the timing argument is in `poly1305.py`). So this module only has to
+be right, which `tests/test_chacha20.py` checks against the RFC's own published test vectors
+rather than trusting this transcription.
 """
 
 from __future__ import annotations

@@ -782,6 +782,30 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         module="storage/store.py",
+        describes="a coin is recorded for an item regardless of whether it still exists or is tracked",
+        old="""\
+                " SELECT ?, ? WHERE EXISTS (SELECT 1 FROM watch_item WHERE id = ? AND status IN "
+                f"({','.join('?' * len(_TRACKED))}))",
+                (item_id, outpoint_hmac_, item_id, *_TRACKED),""",
+        new="""\
+                " VALUES (?, ?)",
+                (item_id, outpoint_hmac_),""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="purge leaves the freed pages in the file",
+        old='            self._db.execute("VACUUM")\n',
+        new="",
+        survives=True,
+        why=(
+            "secure_delete=ON already overwrites each deleted row, so the byte-level purge test "
+            "cannot see the VACUUM: it only detects both safeguards missing together. VACUUM is "
+            "belt-and-braces for the pages secure_delete does not reach (freelist trunk pages, "
+            "partially-filled leaves), and no test observes those. Recorded rather than tested."
+        ),
+    ),
+    Mutation(
+        module="storage/store.py",
         describes="timestamps are written at second precision",
         old="    return int(time.time() // 86400)",
         new="    return int(time.time())",

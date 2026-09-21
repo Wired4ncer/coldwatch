@@ -41,6 +41,7 @@ from .schema import SCHEMA, SCHEMA_VERSION
 
 __all__ = [
     "TOKEN_BYTES",
+    "BadTransition",
     "ChannelRow",
     "Item",
     "ItemStatus",
@@ -96,7 +97,12 @@ class NotArmable(RuntimeError):
     that blocks have been keeping current since the first."""
 
 
-class NotActivatable(RuntimeError):
+class BadTransition(RuntimeError):
+    """A status change from a state that does not allow it: `pause` on an `arming` item,
+    `resume` on an `active` one."""
+
+
+class NotActivatable(BadTransition):
     """`activate` on an item that is not `armed`, or whose routes have no verified channel.
 
     An item with no proven channel is a watch that fails at the one moment it matters
@@ -157,6 +163,12 @@ class Store:
         self._db.execute("PRAGMA foreign_keys=ON")
         if path != ":memory:":
             self._db.execute("PRAGMA journal_mode=WAL")
+        # A file from a newer schema is refused rather than quietly re-stamped: `CREATE TABLE
+        # IF NOT EXISTS` would keep its tables and this process would misread them.
+        found = self._db.execute("PRAGMA user_version").fetchone()[0]
+        if found > SCHEMA_VERSION:
+            self._db.close()
+            raise RuntimeError(f"database schema version {found} is newer than {SCHEMA_VERSION}")
         with self._db:
             self._db.executescript(SCHEMA)
             self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -304,11 +316,13 @@ class Store:
         once `armed`, blocks own the record and a second baseline would be older than it.
 
         ⚠️ The baseline is a snapshot at the height the scan finished on, and the tip has
-        usually moved during the ~186 s it takes. Closing that window -- replaying the blocks
-        between the scan's `bestblock` and the tip through `Matcher.apply` -- is the enrolment
-        service's job, before it calls this. Recording the height here would put a
-        block-precision timestamp at rest, and the service can hold it in memory for the
-        minute it matters.
+        usually moved during the ~186 s it takes. Closing that window is the enrolment
+        service's job, and the order matters: **arm first, then replay** the blocks after the
+        scan's `bestblock` -- for this item only, serialised with the live block path. An
+        `arming` item is invisible to the index, so a replay run *before* this call folds in
+        nothing; and a replay of whole blocks against every item would re-add coins other
+        items have since spent. Recording the height here would put a block-precision
+        timestamp at rest; the service holds it in memory for the minute it matters.
         """
         with self._lock, self._db:
             cur = self._db.execute(
@@ -367,7 +381,7 @@ class Store:
             )
             if cur.rowcount == 0:
                 self._require_item(item_id)
-                raise NotActivatable(item_id)
+                raise BadTransition(item_id)
 
     # ── channels and routes ─────────────────────────────────────────────────────────────────
 
@@ -455,10 +469,21 @@ class Store:
         return tuple(r[0] for r in rows)
 
     def add_outpoint(self, item_id: int, outpoint_hmac_: bytes) -> None:
+        """Record a coin for an item -- if the item is still there and still tracked.
+
+        The loop looks an item up, releases the lock, and only then writes; the API thread
+        can `stop_item` or `purge_watch` in between. A plain insert would then either raise
+        (a purged item is a foreign-key failure, and `OR IGNORE` does not cover those -- it
+        would come out of the block path and stop the whole watcher) or record a coin for a
+        stopped item, which would later match as a spend nobody is watching for. The
+        condition makes both a no-op instead.
+        """
         with self._lock, self._db:
             self._db.execute(
-                "INSERT OR IGNORE INTO utxo (item_id, outpoint_hmac) VALUES (?, ?)",
-                (item_id, outpoint_hmac_),
+                "INSERT OR IGNORE INTO utxo (item_id, outpoint_hmac)"
+                " SELECT ?, ? WHERE EXISTS (SELECT 1 FROM watch_item WHERE id = ? AND status IN "
+                f"({','.join('?' * len(_TRACKED))}))",
+                (item_id, outpoint_hmac_, item_id, *_TRACKED),
             )
 
     def drop_outpoint(self, item_id: int, outpoint_hmac_: bytes) -> None:

@@ -6,9 +6,10 @@ of ciphertexts one database will ever hold (the birthday bound is ~2^48 messages
 key), and it has the property a counter does not: nothing has to remember where it got to,
 so a restored or duplicated database cannot reuse one.
 
-Associated data is the *purpose* of the column (`b"spk"`, `b"label"`, `b"dest"`), so a row's
-`dest_ct` cannot be moved into another row's `spk_ct` and decrypt as a script. Same reasoning
-as the domain tags in `match/keys.py`: cheap to prevent, tedious to debug.
+The associated data is the caller's to choose; the store binds each ciphertext to its column's
+purpose *and* its tenant (`storage/store.py`), so a `dest_ct` cannot be read as an `spk_ct` and
+neither can be moved between watches. Same reasoning as the domain tags in `match/keys.py`:
+cheap to prevent, tedious to debug.
 """
 
 from __future__ import annotations

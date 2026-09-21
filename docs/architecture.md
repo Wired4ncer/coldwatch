@@ -168,11 +168,14 @@ otherwise, which quietly undoes a purge.
   once armed, blocks own the record and a second baseline would be older than it.
 
 The baseline `arm` writes is a snapshot at the height the scan finished on, and the tip has
-usually moved during the ~186 s it took. Closing that window — replaying the blocks between
-the scan's `bestblock` and the tip through `Matcher.apply` before calling `arm` — is the
-enrolment service's job ([#23](https://github.com/Wired4ncer/coldwatch/issues/23)). The height
-is deliberately not stored: it would be a block-precision timestamp at rest, and the service
-only needs it for the minute it takes.
+usually moved during the ~186 s it took. Closing that window is the enrolment service's job
+([#23](https://github.com/Wired4ncer/coldwatch/issues/23)), and the order is **arm first, then
+replay** the blocks after the scan's `bestblock` — *for that item only*, and serialised with the
+live block path. Both halves are load-bearing: an `arming` item is invisible to the index, so a
+replay before `arm` folds in nothing; a replay of whole blocks against every item would re-add
+coins other items have since spent; and a live block landing mid-replay could spend a coin the
+replay has not yet added. The height is deliberately not stored: it would be a block-precision
+timestamp at rest, and the service only needs it for the minute it takes.
 
 ---
 
