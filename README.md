@@ -61,7 +61,9 @@ be. What cannot be cloned is a public track record.
 |---|---|
 | Detection engine | matching loop, block handling, chain catch-up and the live ZMQ sockets built and tested. UTXO-set reconciliation and reorg repair wait on enrolment |
 | Proven against a real node | sockets, parser, block handling and chain catch-up. An induced gap of six blocks was repaired against the production node: the deposit and the spend were both in blocks the subscriber never received, and the alarm fired from the refetch. 68,000+ live mainnet transactions parsed, none malformed |
-| Enrolment / payment / delivery | not started |
+| Delivery channels | email (SMTPS) and Nostr (NIP-17 gift-wrapped DM) built and tested offline against a scripted relay. Neither has yet delivered an alert raised by the engine, because nothing can enrol |
+| Enrolment | the storage half built — schema, encryption at rest, capability tokens, the arming state machine. The API and the baseline-scan service are not built, so the service cannot be signed up to |
+| Payment | not started |
 | Deployment | none |
 
 ## License
