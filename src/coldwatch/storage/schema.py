@@ -7,13 +7,16 @@ after the baseline but before confirmation is still a spend the loop has to fold
 row goes stale and the first reconciliation pass raises a false alarm. So an `armed` item is
 tracked (blocks write its outpoints) but not yet alertable; `active` is both.
 
-A second: `watch`, `watch_item` and `channel` ids are `AUTOINCREMENT`. Without it SQLite
+A second: `watch`, `watch_item`, `channel` and `outbox` ids are `AUTOINCREMENT`. Without it SQLite
 reuses the highest id once that row is deleted, so after a purge the next tenant can be handed
 the ids the last one held -- and an item or channel id still held in memory by the block path
 or a delivery (the window `Store.add_outpoint` describes) would then resolve to someone else's
 record, or decrypt someone else's destination. The cost is `sqlite_sequence`, which keeps the
 highest id each table has ever issued: a rough count of tenants, items and channels ever
-created. That is aggregate, not per-tenant, and is accepted.
+created. That is aggregate, not per-tenant, and is accepted. `outbox` is on the list for
+the same reason with more force: its rows are deleted on every completed delivery, so without
+it the highest id would be reissued constantly, and a worker acking by an id it holds could
+ack another tenant's row.
 """
 
 from __future__ import annotations
@@ -76,7 +79,7 @@ CREATE TABLE IF NOT EXISTS route (
 -- Deliberately NO event history (invariant I3). A row lives here only while a delivery is
 -- in flight and is deleted on completion, success or permanent failure.
 CREATE TABLE IF NOT EXISTS outbox (
-  id            INTEGER PRIMARY KEY,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id       INTEGER NOT NULL REFERENCES watch_item(id) ON DELETE CASCADE,
   channel_id    INTEGER NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
   kind          TEXT NOT NULL,

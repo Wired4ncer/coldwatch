@@ -13,11 +13,18 @@ What is never in the file, by construction rather than by care:
   column's purpose and the tenant's id as associated data, so a ciphertext cannot be read as
   another column or moved to another tenant;
 * a timestamp finer than a day (invariant I3);
-* a row that outlives its purpose: `secure_delete=ON` so a deleted row is overwritten, and
-  `purge_watch` runs `VACUUM` and a `TRUNCATE` checkpoint afterwards so neither freed pages
-  nor the write-ahead log keep a readable copy;
-* an id that has meant two things: `watch`, `watch_item` and `channel` are `AUTOINCREMENT`,
-  so an id a purged tenant held is never handed to the next one (see `schema.py`).
+* a purged tenant: `secure_delete=ON` overwrites each deleted row, and `purge_watch` runs
+  `VACUUM` and a `TRUNCATE` checkpoint afterwards so neither freed pages nor the write-ahead
+  log keep a readable copy;
+* an id that has meant two things: `watch`, `watch_item`, `channel` and `outbox` are
+  `AUTOINCREMENT`, so an id a deleted row held is never handed to another (see `schema.py`).
+
+⚠️ One gap, stated rather than hidden: outside a purge, a deleted row's old page stays in
+`-wal` until the next checkpoint wraps the log. `secure_delete` zeroes the page in the
+database, not the copy the WAL already holds. So a spent coin's `outpoint_hmac` after
+`drop_outpoint` or `stop_item`, and later a completed outbox row, can outlive its purpose by
+up to one WAL cycle. Those are keyed hashes, not ciphertexts; a tenant purge, which removes
+everything that could be decrypted, does not have this gap.
 
 The `WatchIndex` half (`items_watching_spk` and the three others) is what the matching loop
 calls thousands of times a second, and it consults only `spk_hmac`, `outpoint_hmac` and
@@ -98,7 +105,9 @@ class UnknownRow(LookupError):
 
 class PurgeIncomplete(RuntimeError):
     """The rows are deleted but the WAL could not be truncated, so their old bytes are still
-    on disk. Retry the checkpoint; do not report the purge as done."""
+    on disk. Do not report the purge as done: call `Store.finish_purge()` until it returns.
+    Calling `purge_watch` again will not help -- the rows are gone, so it raises `UnknownRow`.
+    """
 
 
 class NotArmable(RuntimeError):
@@ -154,6 +163,11 @@ def _today() -> int:
     return int(time.time() // 86400)
 
 
+#: The busy handler everywhere but the WAL truncation -- sqlite3's own default, made explicit
+#: so `_truncate_wal` can put it back.
+_BUSY_TIMEOUT_MS = 5000
+
+
 def _aad(purpose: bytes, watch_id: int) -> bytes:
     return purpose + struct.pack("<Q", watch_id)
 
@@ -167,11 +181,21 @@ class Store:
         self._lock = threading.RLock()
         # `check_same_thread=False` because the loop and the API are different threads; the
         # lock above is what makes that safe, not SQLite's own serialised mode.
-        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level="DEFERRED")
+        self._db = sqlite3.connect(
+            path,
+            check_same_thread=False,
+            isolation_level="DEFERRED",
+            timeout=_BUSY_TIMEOUT_MS / 1000,
+        )
         self._db.execute("PRAGMA secure_delete=ON")
         self._db.execute("PRAGMA foreign_keys=ON")
         if path != ":memory:":
-            self._db.execute("PRAGMA journal_mode=WAL")
+            # Checked, not assumed: in the rollback-journal fallback a filesystem without
+            # shared-memory support would give, the purge's checkpoint is a silent no-op.
+            mode = self._db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if mode != "wal":
+                self._db.close()
+                raise RuntimeError(f"database refused WAL mode (got {mode!r})")
         # A file from a newer schema is refused rather than quietly re-stamped: `CREATE TABLE
         # IF NOT EXISTS` would keep its tables and this process would misread them.
         found = self._db.execute("PRAGMA user_version").fetchone()[0]
@@ -240,8 +264,8 @@ class Store:
         written, and a long-running process never closes the connection that would delete
         it -- so the purge is not done until a `TRUNCATE` checkpoint has copied the clean
         pages back and cut the log to zero. A checkpoint another reader blocks returns
-        busy; that is raised, not ignored, because the caller is about to tell a user their
-        data is gone.
+        busy; that is raised as `PurgeIncomplete`, not ignored, because the caller is about to
+        tell a user their data is gone. `finish_purge` is the retry.
         """
         with self._lock:
             with self._db:
@@ -249,9 +273,26 @@ class Store:
                 if cur.rowcount == 0:
                     raise UnknownRow(watch_id)
             self._db.execute("VACUUM")
+            self._truncate_wal(watch_id)
+
+    def finish_purge(self) -> None:
+        """Retry the step a `PurgeIncomplete` purge could not do: truncate the WAL. Returns
+        once the log is empty; raises `PurgeIncomplete` again while a reader still blocks it.
+        Safe to call at any time -- it deletes nothing, it only checkpoints."""
+        with self._lock:
+            self._truncate_wal(None)
+
+    def _truncate_wal(self, watch_id: int | None) -> None:
+        # No busy wait. The default handler would wait up to 5 s for readers while this
+        # holds `self._lock`, and so stall the matching thread for as long. A blocked
+        # checkpoint fails at once instead, and the caller retries with `finish_purge`.
+        self._db.execute("PRAGMA busy_timeout=0")
+        try:
             busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
-            if busy:
-                raise PurgeIncomplete(watch_id)
+        finally:
+            self._db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        if busy:
+            raise PurgeIncomplete(watch_id)
 
     # ── items ───────────────────────────────────────────────────────────────────────────────
 

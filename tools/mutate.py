@@ -809,20 +809,42 @@ MUTATIONS: list[Mutation] = [
         describes="purge leaves the WAL as it is, so the tenant's old pages stay in it",
         old="""\
             busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
-            if busy:""",
+        finally:""",
         new="""\
             busy = 0
-            if busy:""",
+        finally:""",
     ),
     Mutation(
         module="storage/store.py",
         describes="purge reports done although a reader kept the WAL from being truncated",
         old="""\
-            if busy:
-                raise PurgeIncomplete(watch_id)""",
+        if busy:
+            raise PurgeIncomplete(watch_id)""",
         new="""\
-            if False:
-                raise PurgeIncomplete(watch_id)""",
+        if False:
+            raise PurgeIncomplete(watch_id)""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a blocked purge waits out the busy handler with the store's lock held",
+        old='        self._db.execute("PRAGMA busy_timeout=0")\n',
+        new="",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="finish_purge returns without checkpointing, so a blocked purge never completes",
+        old="""\
+        with self._lock:
+            self._truncate_wal(None)""",
+        new="""\
+        with self._lock:
+            pass""",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a delivered outbox row's id is reissued to the next delivery",
+        old="CREATE TABLE IF NOT EXISTS outbox (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS outbox (\n  id            INTEGER PRIMARY KEY,",
     ),
     Mutation(
         module="storage/schema.py",

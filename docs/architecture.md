@@ -163,8 +163,8 @@ otherwise, which quietly undoes a purge.
   as `nonce(12) ‖ ciphertext ‖ tag(16)` with a fresh random nonce per seal. The associated data
   is the column's purpose **and the tenant's id**, so a `dest_ct` cannot be read as an `spk_ct`
   and a ciphertext cannot be moved between watches.
-- **Ids are never reissued.** `watch`, `watch_item` and `channel` are `AUTOINCREMENT`. Plain
-  `INTEGER PRIMARY KEY` hands the highest id out again once its row is deleted, so after a
+- **Ids are never reissued.** `watch`, `watch_item`, `channel` and `outbox` are
+  `AUTOINCREMENT`. Plain `INTEGER PRIMARY KEY` hands the highest id out again once its row is deleted, so after a
   purge the next tenant could get the last one's ids -- and an item or channel id still held in
   memory by the block path or a delivery would resolve to the wrong tenant's record, or decrypt
   the wrong tenant's destination. The price is `sqlite_sequence`: the highest id each table has
@@ -172,7 +172,11 @@ otherwise, which quietly undoes a purge.
 - **A purge is not done until the WAL is empty.** WAL mode keeps every page as it was written
   in `-wal`, and only closing the last connection deletes it -- which a running service never
   does. `purge_watch` therefore ends with `wal_checkpoint(TRUNCATE)` and raises
-  `PurgeIncomplete` if a reader kept it from finishing. Truncation hands the old bytes to the
+  `PurgeIncomplete` if a reader kept it from finishing -- at once, not after a busy wait with
+  the store's lock held. `finish_purge` is the retry; a second `purge_watch` cannot be, since
+  the rows are already gone. Outside a purge the same WAL copy exists for any deleted row
+  (a spent coin's `outpoint_hmac`, a completed outbox row) until the log wraps: keyed hashes,
+  not ciphertexts, and stated in `store.py`. Truncation hands the old bytes to the
   filesystem; what the filesystem does with freed blocks is outside what SQLite can promise.
 - **`activate` is refused by the store, not by the caller,** unless the item is `armed` and at
   least one *routed* channel has `verified_at` set. `arm` is refused on anything but `arming`:

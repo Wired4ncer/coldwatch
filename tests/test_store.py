@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import time
 
 import pytest
 
@@ -52,7 +53,7 @@ def store(db_path, keys):
 
 
 def file_bytes(path: str) -> bytes:
-    """Everything SQLite wrote, WAL included, after the connection is gone."""
+    """Everything SQLite has on disk right now, WAL and journal included."""
     data = b""
     for suffix in ("", "-wal", "-journal"):
         try:
@@ -335,9 +336,10 @@ def test_purge_removes_the_tenant_and_the_bytes(db_path, keys):
     with Store(db_path, keys) as store:
         token, watch_id, item_id, _ = enrolled(store)
         store.arm(item_id, [outpoint_hmac(keys.match, PREV, 0)])
-        spk_ct = store._db.execute(
-            "SELECT spk_ct FROM watch_item WHERE id = ?", (item_id,)
-        ).fetchone()[0]
+        spk_ct, label_ct = store._db.execute(
+            "SELECT spk_ct, label_ct FROM watch_item WHERE id = ?", (item_id,)
+        ).fetchone()
+        dest_ct = store._db.execute("SELECT dest_ct FROM channel").fetchone()[0]
         token_hash = hashlib.sha256(token).digest()
         store.purge_watch(watch_id)
         assert store.watch_by_token(token) is None
@@ -348,26 +350,39 @@ def test_purge_removes_the_tenant_and_the_bytes(db_path, keys):
         # Measured while the connection is still open: a service never closes it, and closing
         # is what deletes the WAL -- so a check made only after close cannot see the WAL copy.
         live = file_bytes(db_path)
-        assert spk_ct not in live
-        assert token_hash not in live
+        for secret in (spk_ct, label_ct, dest_ct, token_hash):
+            assert secret not in live
     data = file_bytes(db_path)
-    assert spk_ct not in data
-    assert token_hash not in data
+    for secret in (spk_ct, label_ct, dest_ct, token_hash):
+        assert secret not in data
 
 
 def test_a_purge_a_reader_blocks_is_not_reported_as_done(db_path, keys):
     """While another connection holds a read snapshot the WAL cannot be truncated, and the
-    tenant's old pages are still in it. Saying "purged" then would be a false statement."""
+    tenant's old pages are still in it. Saying "purged" then would be a false statement --
+    and `finish_purge`, not a second `purge_watch`, is what completes it."""
     with Store(db_path, keys) as store:
-        _, watch_id, _, _ = enrolled(store)
+        token, watch_id, _, _ = enrolled(store)
+        token_hash = hashlib.sha256(token).digest()
         reader = sqlite3.connect(db_path)
         try:
             reader.execute("BEGIN")
             reader.execute("SELECT COUNT(*) FROM watch").fetchone()
+            started = time.monotonic()
             with pytest.raises(PurgeIncomplete):
                 store.purge_watch(watch_id)
+            # Fails at once rather than waiting out the busy handler with the lock held,
+            # which would stall the matching thread for as long.
+            assert time.monotonic() - started < 1.0
+            assert token_hash in file_bytes(db_path)
+            with pytest.raises(PurgeIncomplete):
+                store.finish_purge()
         finally:
             reader.close()
+        with pytest.raises(UnknownRow):  # the rows are gone; a second purge cannot help
+            store.purge_watch(watch_id)
+        store.finish_purge()
+        assert token_hash not in file_bytes(db_path)
 
 
 def test_a_purged_tenants_ids_are_never_issued_again(store):
@@ -381,6 +396,24 @@ def test_a_purged_tenants_ids_are_never_issued_again(store):
     assert new_watch_id > watch_id
     assert new_item_id > item_id
     assert new_channel_id > channel_id
+
+
+def test_a_delivered_outbox_rows_id_is_never_issued_again(store):
+    """Outbox rows are deleted on every completed delivery, so a reissued id would be routine,
+    not rare -- and a worker acking by an id it holds would ack someone else's row."""
+    _, _, item_id, channel_id = enrolled(store)
+
+    def enqueue() -> int:
+        with store._db:
+            return store._db.execute(
+                "INSERT INTO outbox (item_id, channel_id, kind, next_try_at) VALUES (?, ?, ?, ?)",
+                (item_id, channel_id, "alarm", TODAY),
+            ).lastrowid
+
+    first = enqueue()
+    with store._db:
+        store._db.execute("DELETE FROM outbox WHERE id = ?", (first,))
+    assert enqueue() > first
 
 
 def test_purge_unknown_watch_is_unknown(store):
