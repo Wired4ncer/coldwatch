@@ -665,6 +665,224 @@ MUTATIONS: list[Mutation] = [
         new="""\
                 raise ValueError(f"relay must be wss://: {relay!r}")""",
     ),
+    # ── crypto/: the AEAD every ciphertext column sits under ───────────────────────────────
+    #
+    # Each of these is a transcription slip that leaves round-trips working -- seal then open
+    # still returns the plaintext -- so only the RFC vectors or a tamper test can see it.
+    Mutation(
+        module="crypto/poly1305.py",
+        describes="r is used unclamped",
+        old="    r = int.from_bytes(key[:16], \"little\") & _R_CLAMP",
+        new="    r = int.from_bytes(key[:16], \"little\")",
+    ),
+    Mutation(
+        module="crypto/poly1305.py",
+        describes="the accumulator wraps at 2^130 instead of 2^130 - 5",
+        old="_P = (1 << 130) - 5",
+        new="_P = 1 << 130",
+    ),
+    Mutation(
+        module="crypto/poly1305.py",
+        describes="a short final block is padded with zeros rather than terminated with a 1 bit",
+        old="        n = int.from_bytes(chunk, \"little\") | (1 << (8 * len(chunk)))",
+        new="        n = int.from_bytes(chunk, \"little\") | (1 << 128)",
+    ),
+    Mutation(
+        module="crypto/aead.py",
+        describes="the tag does not cover the associated data",
+        old="        aad + _pad16(aad)\n        + ciphertext + _pad16(ciphertext)",
+        new="        ciphertext + _pad16(ciphertext)",
+    ),
+    Mutation(
+        module="crypto/aead.py",
+        describes="the Poly1305 key shares keystream with the plaintext",
+        old="    ciphertext = chacha20_xor(key, nonce, plaintext, counter=1)",
+        new="    ciphertext = chacha20_xor(key, nonce, plaintext, counter=0)",
+    ),
+    Mutation(
+        module="crypto/aead.py",
+        describes="every seal uses the same nonce",
+        old="    return _seal_with_nonce(key, secrets.token_bytes(NONCE_LEN), plaintext, aad)",
+        new="    return _seal_with_nonce(key, bytes(NONCE_LEN), plaintext, aad)",
+    ),
+    Mutation(
+        module="crypto/aead.py",
+        describes="open() decrypts whatever it is handed and never checks the tag",
+        old="    if not hmac.compare_digest(_tag(otk, aad, ciphertext), tag):",
+        new="    if False:",
+    ),
+    # ── storage/store.py: what is and is not in the file ───────────────────────────────────
+    Mutation(
+        module="storage/store.py",
+        describes="the capability token itself is the lookup key, so the file holds it",
+        old="""\
+                "INSERT INTO watch (token_hash, created_at) VALUES (?, ?)",
+                (hashlib.sha256(token).digest(), self._today()),""",
+        new="""\
+                "INSERT INTO watch (token_hash, created_at) VALUES (?, ?)",
+                (token, self._today()),""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="the script is stored in the clear",
+        old="                    seal(self._keys.store, spk, _aad(_AAD_SPK, watch_id)),",
+        new="                    spk,",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="every ciphertext column is sealed under the same associated data",
+        old="    return purpose + struct.pack(\"<Q\", watch_id)",
+        new="    return b\"\"",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="an item is activatable with no proven channel",
+        old="            if row[0] != ItemStatus.ARMED.value or not row[1]:",
+        new="            if row[0] != ItemStatus.ARMED.value:",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a second baseline silently overwrites the record blocks have been keeping",
+        old="""\
+                "UPDATE watch_item SET status = ? WHERE id = ? AND status = ?",
+                (ItemStatus.ARMED.value, item_id, ItemStatus.ARMING.value),""",
+        new="""\
+                "UPDATE watch_item SET status = ? WHERE id = ?",
+                (ItemStatus.ARMED.value, item_id),""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="an arming item is already visible to the loop, so it alerts before the test-fire",
+        old="_TRACKED = tuple(s.value for s in (ItemStatus.ARMED, ItemStatus.ACTIVE, ItemStatus.PAUSED))",
+        new="_TRACKED = tuple(s.value for s in ItemStatus)",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a paused item drops out of the loop, so its record rots while paused",
+        old="_TRACKED = tuple(s.value for s in (ItemStatus.ARMED, ItemStatus.ACTIVE, ItemStatus.PAUSED))",
+        new="_TRACKED = tuple(s.value for s in (ItemStatus.ARMED, ItemStatus.ACTIVE))",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a stopped item keeps its coins, so a later spend of them still alarms",
+        old="            self._db.execute(\"DELETE FROM utxo WHERE item_id = ?\", (item_id,))\n",
+        new="",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="secure_delete is off, so a purged row stays readable in a free page",
+        old="        self._db.execute(\"PRAGMA secure_delete=ON\")",
+        new="        self._db.execute(\"PRAGMA secure_delete=OFF\")",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a route may join an item to another tenant's channel",
+        old="            if not owner[0]:\n                raise ValueError(\"item and channel belong to different watches\")\n",
+        new="",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a coin is recorded for an item regardless of whether it still exists or is tracked",
+        old="""\
+                " SELECT ?, ? WHERE EXISTS (SELECT 1 FROM watch_item WHERE id = ? AND status IN "
+                f"({','.join('?' * len(_TRACKED))}))",
+                (item_id, outpoint_hmac_, item_id, *_TRACKED),""",
+        new="""\
+                " VALUES (?, ?)",
+                (item_id, outpoint_hmac_),""",
+    ),
+    # Caught only because VACUUM is the statement that fails with a cursor open -- the
+    # permanent-error test sees that *something* raising ran before the checkpoint, not that
+    # free pages were cleaned. What VACUUM cleans beyond secure_delete (freelist trunk pages,
+    # partially-filled leaves) is still unobserved by any byte-level test. Named for what is
+    # actually caught, so the sweep does not read as proof of the page guarantee.
+    Mutation(
+        module="storage/store.py",
+        describes="the scrub does not run VACUUM (what VACUUM cleans stays untested)",
+        old='            self._db.execute("VACUUM")\n',
+        new="",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="purge leaves the WAL as it is, so the tenant's old pages stay in it",
+        old="""\
+            busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        except""",
+        new="""\
+            busy = 0
+        except""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="purge reports done although a reader kept the WAL from being truncated",
+        old="""\
+        if busy:
+            raise PurgeIncomplete(watch_id)""",
+        new="""\
+        if False:
+            raise PurgeIncomplete(watch_id)""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a blocked purge waits out the busy handler with the store's lock held",
+        old='            self._db.execute("PRAGMA busy_timeout=0")\n',
+        new="",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="finish_purge returns without checkpointing, so a blocked purge never completes",
+        old="""\
+        with self._lock:
+            self._scrub(None)""",
+        new="""\
+        with self._lock:
+            pass""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a VACUUM that fails after the delete escapes as a raw database error",
+        old="            raise PurgeIncomplete(watch_id) from e\n",
+        new="            raise\n",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a scrub error no retry can fix is reported as retryable PurgeIncomplete",
+        old="""\
+            if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+""",
+        new="",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a delivered outbox row's id is reissued to the next delivery",
+        old="CREATE TABLE IF NOT EXISTS outbox (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS outbox (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a purged tenant's watch id is reused by the next tenant",
+        old="CREATE TABLE IF NOT EXISTS watch (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS watch (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a purged tenant's item id is reused by the next tenant",
+        old="CREATE TABLE IF NOT EXISTS watch_item (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS watch_item (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a purged tenant's channel id is reused by the next tenant",
+        old="CREATE TABLE IF NOT EXISTS channel (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS channel (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="timestamps are written at second precision",
+        old="    return int(time.time() // 86400)",
+        new="    return int(time.time())",
+    ),
 ]
 
 

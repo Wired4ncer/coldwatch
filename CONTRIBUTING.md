@@ -75,14 +75,22 @@ this repository. That is deliberate.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .                           # the package, plus pyzmq — its one runtime dependency
+pip install -e .                           # the package and its three runtime dependencies
 pip install -r requirements-dev.txt        # pytest, ruff
 ```
 
-The runtime has exactly one third-party dependency, `pyzmq`, because bitcoind publishes over ZMQ
-and there is no standard-library client. Everything else is standard library on purpose,
-including the transaction parser — see [SECURITY.md](SECURITY.md). Adding a second runtime
-dependency is a decision, not a convenience, and belongs in a pull request that argues for it.
+The runtime has **three** third-party dependencies — `pyzmq`, `coincurve`, `websocket-client` —
+each argued for in [#3](https://github.com/Wired4ncer/coldwatch/issues/3) and listed with what
+it is trusted with in [SECURITY.md](SECURITY.md). All three declare no transitive requirements,
+so three direct is also three total.
+
+Everything else is standard library on purpose, including the transaction parser, the
+ChaCha20-Poly1305 the database is encrypted under, HKDF, bech32 and NIP-44's padding. The rule
+#3 settled, for the next one: a dependency is admissible only when the work is impossible or
+actively dangerous in Python (elliptic-curve arithmetic, a wire protocol) **and** sits outside
+the alert-content path — never for convenience, and never for anything with published test
+vectors we could check a transcription against ourselves. Adding one is a decision, not a
+convenience, and belongs in a pull request that argues for it.
 
 Then:
 
