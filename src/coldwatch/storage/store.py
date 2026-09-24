@@ -280,8 +280,9 @@ class Store:
     def finish_purge(self) -> None:
         """Retry what a `PurgeIncomplete` purge could not finish: `VACUUM`, then truncate the
         WAL. One attempt: returns if both succeed, raises `PurgeIncomplete` at once if
-        something still blocks them -- call it again later. Safe at any time; it deletes
-        nothing."""
+        another connection still blocks them -- call it again later. Any other database error
+        is permanent and propagates as itself. Deletes nothing, but not cheap: a full `VACUUM`
+        with the store's lock held, so call it after a purge, not on a timer."""
         with self._lock:
             self._scrub(None)
 
@@ -294,6 +295,12 @@ class Store:
             self._db.execute("VACUUM")
             busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         except sqlite3.OperationalError as e:
+            # Only "another connection is in the way" is worth retrying. A full disk, a
+            # read-only file or a statement left open would fail the same way forever, and a
+            # caller told to "call finish_purge again" would loop on it without seeing why.
+            code = getattr(e, "sqlite_errorcode", 0) & 0xFF  # absent if raised by the module
+            if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
             raise PurgeIncomplete(watch_id) from e
         finally:
             self._db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")

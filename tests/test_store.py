@@ -386,9 +386,10 @@ def test_a_purge_a_reader_blocks_is_not_reported_as_done(db_path, keys):
 
 
 def test_a_scrub_a_writer_blocks_is_incomplete_not_a_raw_database_error(db_path, keys):
-    """VACUUM needs the write lock. If another connection holds it, the failure must reach the
-    caller as `PurgeIncomplete` -- the one error that says "call finish_purge" -- and at once,
-    not after the busy handler has held the store's lock for 5 s."""
+    """With another connection holding the write lock, the scrub must fail as
+    `PurgeIncomplete` -- the one error that says "call finish_purge" -- and at once, not after
+    the busy handler has held the store's lock for 5 s. Reached through `finish_purge`: a test
+    cannot put a writer between a purge's DELETE and its VACUUM."""
     with Store(db_path, keys) as store:
         writer = sqlite3.connect(db_path, isolation_level=None)
         try:
@@ -401,6 +402,18 @@ def test_a_scrub_a_writer_blocks_is_incomplete_not_a_raw_database_error(db_path,
             writer.close()
         store.finish_purge()
         assert store._db.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_a_scrub_that_can_never_succeed_is_not_called_retryable(store):
+    """A statement left open makes VACUUM fail for as long as it lives. Reporting that as
+    `PurgeIncomplete` would send the caller round a retry loop that cannot end."""
+    enrolled(store)
+    enrolled(store)
+    cursor = store._db.execute("SELECT id FROM watch")
+    cursor.fetchone()  # one row read, one left: the statement is still in progress
+    with pytest.raises(sqlite3.OperationalError):  # PurgeIncomplete is not one of these
+        store.finish_purge()
+    cursor.close()
 
 
 def test_a_purged_tenants_ids_are_never_issued_again(store):

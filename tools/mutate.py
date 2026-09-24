@@ -791,18 +791,16 @@ MUTATIONS: list[Mutation] = [
                 " VALUES (?, ?)",
                 (item_id, outpoint_hmac_),""",
     ),
+    # Caught only because VACUUM is the statement that fails with a cursor open -- the
+    # permanent-error test sees that *something* raising ran before the checkpoint, not that
+    # free pages were cleaned. What VACUUM cleans beyond secure_delete (freelist trunk pages,
+    # partially-filled leaves) is still unobserved by any byte-level test. Named for what is
+    # actually caught, so the sweep does not read as proof of the page guarantee.
     Mutation(
         module="storage/store.py",
-        describes="purge leaves the freed pages in the file",
+        describes="the scrub does not run VACUUM (what VACUUM cleans stays untested)",
         old='            self._db.execute("VACUUM")\n',
         new="",
-        survives=True,
-        why=(
-            "secure_delete=ON already overwrites each deleted row, so the byte-level purge test "
-            "cannot see the VACUUM: it only detects both safeguards missing together. VACUUM is "
-            "belt-and-braces for the pages secure_delete does not reach (freelist trunk pages, "
-            "partially-filled leaves), and no test observes those. Recorded rather than tested."
-        ),
     ),
     Mutation(
         module="storage/store.py",
@@ -843,9 +841,15 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         module="storage/store.py",
         describes="a VACUUM that fails after the delete escapes as a raw database error",
+        old="            raise PurgeIncomplete(watch_id) from e\n",
+        new="            raise\n",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a scrub error no retry can fix is reported as retryable PurgeIncomplete",
         old="""\
-        except sqlite3.OperationalError as e:
-            raise PurgeIncomplete(watch_id) from e
+            if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
 """,
         new="",
     ),
