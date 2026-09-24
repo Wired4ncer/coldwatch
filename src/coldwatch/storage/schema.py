@@ -6,6 +6,14 @@ minutes to days apart, and the record must be kept current during that gap -- a 
 after the baseline but before confirmation is still a spend the loop has to fold in, or the
 row goes stale and the first reconciliation pass raises a false alarm. So an `armed` item is
 tracked (blocks write its outpoints) but not yet alertable; `active` is both.
+
+A second: `watch`, `watch_item` and `channel` ids are `AUTOINCREMENT`. Without it SQLite
+reuses the highest id once that row is deleted, so after a purge the next tenant can be handed
+the ids the last one held -- and an item or channel id still held in memory by the block path
+or a delivery (the window `Store.add_outpoint` describes) would then resolve to someone else's
+record, or decrypt someone else's destination. The cost is `sqlite_sequence`, which keeps the
+highest id each table has ever issued: a rough count of tenants, items and channels ever
+created. That is aggregate, not per-tenant, and is accepted.
 """
 
 from __future__ import annotations
@@ -16,7 +24,7 @@ SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS watch (
-  id            INTEGER PRIMARY KEY,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash    BLOB NOT NULL UNIQUE,
   balance_sats  INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL DEFAULT 'active'
@@ -26,7 +34,7 @@ CREATE TABLE IF NOT EXISTS watch (
 );
 
 CREATE TABLE IF NOT EXISTS watch_item (
-  id            INTEGER PRIMARY KEY,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
   watch_id      INTEGER NOT NULL REFERENCES watch(id) ON DELETE CASCADE,
   chain         TEXT NOT NULL,
   spk_hmac      BLOB NOT NULL,
@@ -49,7 +57,7 @@ CREATE TABLE IF NOT EXISTS utxo (
 CREATE INDEX IF NOT EXISTS idx_utxo_op ON utxo(outpoint_hmac);
 
 CREATE TABLE IF NOT EXISTS channel (
-  id            INTEGER PRIMARY KEY,
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
   watch_id      INTEGER NOT NULL REFERENCES watch(id) ON DELETE CASCADE,
   kind          TEXT NOT NULL,
   dest_ct       BLOB NOT NULL,

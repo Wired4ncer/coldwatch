@@ -14,7 +14,10 @@ What is never in the file, by construction rather than by care:
   another column or moved to another tenant;
 * a timestamp finer than a day (invariant I3);
 * a row that outlives its purpose: `secure_delete=ON` so a deleted row is overwritten, and
-  `purge_watch` runs `VACUUM` afterwards so freed pages are not left readable.
+  `purge_watch` runs `VACUUM` and a `TRUNCATE` checkpoint afterwards so neither freed pages
+  nor the write-ahead log keep a readable copy;
+* an id that has meant two things: `watch`, `watch_item` and `channel` are `AUTOINCREMENT`,
+  so an id a purged tenant held is never handed to the next one (see `schema.py`).
 
 The `WatchIndex` half (`items_watching_spk` and the three others) is what the matching loop
 calls thousands of times a second, and it consults only `spk_hmac`, `outpoint_hmac` and
@@ -47,6 +50,7 @@ __all__ = [
     "ItemStatus",
     "NotActivatable",
     "NotArmable",
+    "PurgeIncomplete",
     "Store",
     "UnknownRow",
     "Watch",
@@ -90,6 +94,11 @@ class WatchStatus(Enum):
 
 class UnknownRow(LookupError):
     """No such watch, item or channel. Carries the id and nothing else."""
+
+
+class PurgeIncomplete(RuntimeError):
+    """The rows are deleted but the WAL could not be truncated, so their old bytes are still
+    on disk. Retry the checkpoint; do not report the purge as done."""
 
 
 class NotArmable(RuntimeError):
@@ -226,6 +235,13 @@ class Store:
         watch; `secure_delete` zeroes each as it goes; `VACUUM` rebuilds the file so nothing
         of them remains in a free page. `VACUUM` cannot run inside a transaction, hence the
         commit between.
+
+        Then the WAL. Every page this tenant ever touched is still in `-wal` as it was
+        written, and a long-running process never closes the connection that would delete
+        it -- so the purge is not done until a `TRUNCATE` checkpoint has copied the clean
+        pages back and cut the log to zero. A checkpoint another reader blocks returns
+        busy; that is raised, not ignored, because the caller is about to tell a user their
+        data is gone.
         """
         with self._lock:
             with self._db:
@@ -233,6 +249,9 @@ class Store:
                 if cur.rowcount == 0:
                     raise UnknownRow(watch_id)
             self._db.execute("VACUUM")
+            busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+            if busy:
+                raise PurgeIncomplete(watch_id)
 
     # ── items ───────────────────────────────────────────────────────────────────────────────
 

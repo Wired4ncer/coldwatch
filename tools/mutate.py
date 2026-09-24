@@ -806,6 +806,44 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         module="storage/store.py",
+        describes="purge leaves the WAL as it is, so the tenant's old pages stay in it",
+        old="""\
+            busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+            if busy:""",
+        new="""\
+            busy = 0
+            if busy:""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="purge reports done although a reader kept the WAL from being truncated",
+        old="""\
+            if busy:
+                raise PurgeIncomplete(watch_id)""",
+        new="""\
+            if False:
+                raise PurgeIncomplete(watch_id)""",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a purged tenant's watch id is reused by the next tenant",
+        old="CREATE TABLE IF NOT EXISTS watch (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS watch (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a purged tenant's item id is reused by the next tenant",
+        old="CREATE TABLE IF NOT EXISTS watch_item (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS watch_item (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/schema.py",
+        describes="a purged tenant's channel id is reused by the next tenant",
+        old="CREATE TABLE IF NOT EXISTS channel (\n  id            INTEGER PRIMARY KEY AUTOINCREMENT,",
+        new="CREATE TABLE IF NOT EXISTS channel (\n  id            INTEGER PRIMARY KEY,",
+    ),
+    Mutation(
+        module="storage/store.py",
         describes="timestamps are written at second precision",
         old="    return int(time.time() // 86400)",
         new="    return int(time.time())",

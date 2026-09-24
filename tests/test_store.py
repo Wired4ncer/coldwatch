@@ -21,6 +21,7 @@ from coldwatch.storage import (
     ItemStatus,
     NotActivatable,
     NotArmable,
+    PurgeIncomplete,
     Store,
     UnknownRow,
     WatchStatus,
@@ -174,7 +175,14 @@ def test_there_is_no_event_table(store):
     names = {
         r[0] for r in store._db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    assert names == {"watch", "watch_item", "utxo", "channel", "route", "outbox"}
+    # `sqlite_sequence` is SQLite's own, created by AUTOINCREMENT: one row per table holding
+    # the highest id ever issued. A counter, not a history -- no times, no per-row trace.
+    assert names == {
+        "watch", "watch_item", "utxo", "channel", "route", "outbox", "sqlite_sequence",
+    }
+    assert {r[1] for r in store._db.execute("PRAGMA table_info(sqlite_sequence)")} == {
+        "name", "seq",
+    }
 
 
 # ── the item state machine ──────────────────────────────────────────────────────────────────
@@ -337,9 +345,42 @@ def test_purge_removes_the_tenant_and_the_bytes(db_path, keys):
             store.item(item_id)
         assert store.items_owning_outpoint(outpoint_hmac(keys.match, PREV, 0)) == ()
         assert store.channels_for(item_id) == ()
+        # Measured while the connection is still open: a service never closes it, and closing
+        # is what deletes the WAL -- so a check made only after close cannot see the WAL copy.
+        live = file_bytes(db_path)
+        assert spk_ct not in live
+        assert token_hash not in live
     data = file_bytes(db_path)
     assert spk_ct not in data
     assert token_hash not in data
+
+
+def test_a_purge_a_reader_blocks_is_not_reported_as_done(db_path, keys):
+    """While another connection holds a read snapshot the WAL cannot be truncated, and the
+    tenant's old pages are still in it. Saying "purged" then would be a false statement."""
+    with Store(db_path, keys) as store:
+        _, watch_id, _, _ = enrolled(store)
+        reader = sqlite3.connect(db_path)
+        try:
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM watch").fetchone()
+            with pytest.raises(PurgeIncomplete):
+                store.purge_watch(watch_id)
+        finally:
+            reader.close()
+
+
+def test_a_purged_tenants_ids_are_never_issued_again(store):
+    """Without AUTOINCREMENT SQLite reuses the highest id once its row is gone. An item or
+    channel id still held in memory by the block path or a delivery would then resolve to
+    the next tenant's record -- and decrypt the next tenant's destination."""
+    enrolled(store)  # a tenant that stays, so the purged one is not the only row
+    _, watch_id, item_id, channel_id = enrolled(store)
+    store.purge_watch(watch_id)
+    _, new_watch_id, new_item_id, new_channel_id = enrolled(store)
+    assert new_watch_id > watch_id
+    assert new_item_id > item_id
+    assert new_channel_id > channel_id
 
 
 def test_purge_unknown_watch_is_unknown(store):
