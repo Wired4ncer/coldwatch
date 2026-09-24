@@ -192,8 +192,10 @@ class Store:
         if path != ":memory:":
             # Checked, not assumed: in the rollback-journal fallback a filesystem without
             # shared-memory support would give, the purge's checkpoint is a silent no-op.
+            # "memory" is an in-memory database opened by URI; it has no file to leave behind.
+            # "" (SQLite's private temporary file) is refused along with any other non-WAL mode.
             mode = self._db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-            if mode != "wal":
+            if mode not in ("wal", "memory"):
                 self._db.close()
                 raise RuntimeError(f"database refused WAL mode (got {mode!r})")
         # A file from a newer schema is refused rather than quietly re-stamped: `CREATE TABLE
@@ -265,30 +267,34 @@ class Store:
         it -- so the purge is not done until a `TRUNCATE` checkpoint has copied the clean
         pages back and cut the log to zero. A checkpoint another reader blocks returns
         busy; that is raised as `PurgeIncomplete`, not ignored, because the caller is about to
-        tell a user their data is gone. `finish_purge` is the retry.
+        tell a user their data is gone. So is a `VACUUM` that fails: either way the rows are
+        deleted and the file is not yet clean. `finish_purge` is the retry.
         """
         with self._lock:
             with self._db:
                 cur = self._db.execute("DELETE FROM watch WHERE id = ?", (watch_id,))
                 if cur.rowcount == 0:
                     raise UnknownRow(watch_id)
-            self._db.execute("VACUUM")
-            self._truncate_wal(watch_id)
+            self._scrub(watch_id)
 
     def finish_purge(self) -> None:
-        """Retry the step a `PurgeIncomplete` purge could not do: truncate the WAL. Returns
-        once the log is empty; raises `PurgeIncomplete` again while a reader still blocks it.
-        Safe to call at any time -- it deletes nothing, it only checkpoints."""
+        """Retry what a `PurgeIncomplete` purge could not finish: `VACUUM`, then truncate the
+        WAL. One attempt: returns if both succeed, raises `PurgeIncomplete` at once if
+        something still blocks them -- call it again later. Safe at any time; it deletes
+        nothing."""
         with self._lock:
-            self._truncate_wal(None)
+            self._scrub(None)
 
-    def _truncate_wal(self, watch_id: int | None) -> None:
-        # No busy wait. The default handler would wait up to 5 s for readers while this
-        # holds `self._lock`, and so stall the matching thread for as long. A blocked
-        # checkpoint fails at once instead, and the caller retries with `finish_purge`.
-        self._db.execute("PRAGMA busy_timeout=0")
+    def _scrub(self, watch_id: int | None) -> None:
+        # No busy wait. The default handler would wait up to 5 s for another connection while
+        # this holds `self._lock`, and so stall the matching thread for as long. A blocked
+        # step fails at once instead, and the caller retries with `finish_purge`.
         try:
+            self._db.execute("PRAGMA busy_timeout=0")
+            self._db.execute("VACUUM")
             busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        except sqlite3.OperationalError as e:
+            raise PurgeIncomplete(watch_id) from e
         finally:
             self._db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         if busy:

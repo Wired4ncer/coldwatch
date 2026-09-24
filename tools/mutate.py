@@ -809,10 +809,10 @@ MUTATIONS: list[Mutation] = [
         describes="purge leaves the WAL as it is, so the tenant's old pages stay in it",
         old="""\
             busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
-        finally:""",
+        except""",
         new="""\
             busy = 0
-        finally:""",
+        except""",
     ),
     Mutation(
         module="storage/store.py",
@@ -827,7 +827,7 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         module="storage/store.py",
         describes="a blocked purge waits out the busy handler with the store's lock held",
-        old='        self._db.execute("PRAGMA busy_timeout=0")\n',
+        old='            self._db.execute("PRAGMA busy_timeout=0")\n',
         new="",
     ),
     Mutation(
@@ -835,10 +835,19 @@ MUTATIONS: list[Mutation] = [
         describes="finish_purge returns without checkpointing, so a blocked purge never completes",
         old="""\
         with self._lock:
-            self._truncate_wal(None)""",
+            self._scrub(None)""",
         new="""\
         with self._lock:
             pass""",
+    ),
+    Mutation(
+        module="storage/store.py",
+        describes="a VACUUM that fails after the delete escapes as a raw database error",
+        old="""\
+        except sqlite3.OperationalError as e:
+            raise PurgeIncomplete(watch_id) from e
+""",
+        new="",
     ),
     Mutation(
         module="storage/schema.py",

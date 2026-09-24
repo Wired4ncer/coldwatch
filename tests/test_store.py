@@ -385,6 +385,24 @@ def test_a_purge_a_reader_blocks_is_not_reported_as_done(db_path, keys):
         assert token_hash not in file_bytes(db_path)
 
 
+def test_a_scrub_a_writer_blocks_is_incomplete_not_a_raw_database_error(db_path, keys):
+    """VACUUM needs the write lock. If another connection holds it, the failure must reach the
+    caller as `PurgeIncomplete` -- the one error that says "call finish_purge" -- and at once,
+    not after the busy handler has held the store's lock for 5 s."""
+    with Store(db_path, keys) as store:
+        writer = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
+            with pytest.raises(PurgeIncomplete):
+                store.finish_purge()
+            assert time.monotonic() - started < 1.0
+        finally:
+            writer.close()
+        store.finish_purge()
+        assert store._db.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
 def test_a_purged_tenants_ids_are_never_issued_again(store):
     """Without AUTOINCREMENT SQLite reuses the highest id once its row is gone. An item or
     channel id still held in memory by the block path or a delivery would then resolve to
